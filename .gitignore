@@ -1,6 +1,13 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.python-version
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+htmlcov/
 *.so
 .Python
 build/
@@ -25,16 +32,46 @@ venv/
 env/
 ENV/
 .venv
+.venv-physicsnemo/
+venv-*/
+*_env/
+
+# JAX / PyTorch compiler and kernel caches
+.jax_cache/
+jax_cache/
+torch_compile_debug/
+inductor_cache/
+triton_cache/
 *.log
-.pytest_cache/
-.coverage
-htmlcov/
 .tox/
-.hypothesis/
-.mypy_cache/
 .dmypy.json
 dmypy.json
 .DS_Store
 *.swp
 *.swo
 *~
+
+# Local datasets and model weights. Keep them locally or in artifact storage.
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+physicsnemo_fno/datasets/
+physicsnemo_fno/runs/
+
+# Generated benchmark/training output directories
+benchmark_outputs/
+generated_outputs/
+outputs/
+snapshots/
+
+# One-off backups and runtime output
+*.bak
+*.bak_*
+*.backup
+*.tmp
+*.temp
+.writer.lock
+AoA=*.csv
+*_audit*.txt
