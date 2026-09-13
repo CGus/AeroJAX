@@ -5,39 +5,23 @@ A modular, maintainable fluid dynamics visualization tool
 """
 
 import sys
+import os
 import time
 import warnings
-import os
 import logging
 from typing import Optional, Dict, Any
 import numpy as np
+# Allow the separate PyTorch process to share the GPU with AeroJAX. This only
+# changes JAX's allocator policy; solver kernels and numerical defaults are unchanged.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import jax.numpy as jnp
 import jax
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget, 
     QMenuBar, QDockWidget, QHBoxLayout, QSizePolicy, QSplitter, QMessageBox
 )
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QSettings
 import pyqtgraph as pg
-
-# Suppress Qt layout warnings that don't affect functionality
-warnings.filterwarnings('ignore', message='.*QGridLayoutEngine.*')
-warnings.filterwarnings('ignore', message='.*overflow encountered in cast.*')
-
-# Suppress Qt debug output by redirecting stderr
-class QtWarningFilter:
-    def __init__(self):
-        self.stderr = sys.stderr
-        
-    def write(self, text):
-        if 'QGridLayoutEngine' in text or 'overflow encountered in cast' in text:
-            return  # Suppress these warnings
-        self.stderr.write(text)
-        
-    def flush(self):
-        self.stderr.flush()
-
-sys.stderr = QtWarningFilter()
 
 # Configure logging
 logging.basicConfig(
@@ -144,7 +128,6 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
         print("Application initialized successfully")
         
         # Connect adaptive dt checkbox manually to prevent automatic triggering
-        self.control_panel.adaptive_dt_checkbox.clicked.connect(self.on_adaptive_dt_checkbox_clicked)
     
     # -------------------------------------------------------------------------
     # Initialization
@@ -274,15 +257,32 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
         # Add floating control bar as a dock widget
         self.floating_control_dock = QDockWidget("Quick Controls", self)
         self.floating_control_dock.setWidget(self.floating_control_bar)
-        self.floating_control_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetFloatable |
-                                               QDockWidget.DockWidgetFeature.DockWidgetMovable)
-        self.floating_control_dock.setAllowedAreas(Qt.DockWidgetArea.TopDockWidgetArea |
-                                                   Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.floating_control_dock)
-        self.floating_control_dock.setFloating(True)  # Make it float on startup
+        self.floating_control_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable |
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+        )
+        self.floating_control_dock.setAllowedAreas(
+            Qt.DockWidgetArea.TopDockWidgetArea |
+            Qt.DockWidgetArea.BottomDockWidgetArea
+        )
+
+        # Quick Controls agganciato alla finestra principale all'avvio.
+        # Disabilita l'animazione di docking per evitare lo spostamento
+        # visibile del pannello durante l'aggancio.
+        self.addDockWidget(
+            Qt.DockWidgetArea.TopDockWidgetArea,
+            self.floating_control_dock
+        )
+        self.floating_control_dock.setFloating(False)
 
         # Window properties
         self.setWindowTitle("Baseline Navier-Stokes Solver")
+
+        # Memoria persistente dell'interfaccia
+        self.ui_settings = QSettings(
+            "AeroJAX",
+            "BaselineNavierStokesSolver"
+        )
         self.setGeometry(100, 100, 
                        PerformanceSettings.DEFAULT_WINDOW_WIDTH,
                        PerformanceSettings.DEFAULT_WINDOW_HEIGHT)
@@ -325,22 +325,145 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
             self.control_panel.obstacle_controls
         )
 
-        # Add widgets to splitter with initial sizes
+        # Add widgets to splitter
         splitter.addWidget(left_sidebar)
         splitter.addWidget(self.plot_widget)
         splitter.addWidget(self.right_control_panel)
-        splitter.setSizes([320, 1040, 240])  # Initial 20/65/15 split for 1600px width
+
+        # --------------------------------------------------------
+        # Sidebar ridimensionabili con larghezza minima intelligente
+        # --------------------------------------------------------
+
+        # La larghezza minima SX viene ricavata dal contenuto reale.
+        # Evita sovrapposizioni dei pulsanti senza bloccare lo splitter.
+        control_hint = self.control_panel.sizeHint().width()
+        control_min = self.control_panel.minimumSizeHint().width()
+
+        # Limite ragionevole per evitare che un sizeHint anomalo
+        # renda impossibile restringere la colonna.
+        left_min_width = max(
+            300,
+            control_min,
+            min(control_hint, 380)
+        )
+
+        # ========================================================
+        # SIDEBAR SX: larghezza minima intelligente
+        # ========================================================
+
+        # Calcoliamo la dimensione necessaria al contenuto reale.
+        control_hint = self.control_panel.sizeHint().width()
+        control_min = self.control_panel.minimumSizeHint().width()
+
+        # Protezione contro sizeHint anomali.
+        if control_hint < 1:
+            control_hint = 320
+
+        if control_min < 1:
+            control_min = 300
+
+        # Minimo sufficiente a evitare sovrapposizioni.
+        # Rimane comunque ridimensionabile tramite lo splitter.
+        left_min_width = max(
+            300,
+            control_min,
+            min(control_hint, 380)
+        )
+
+        left_sidebar.setMinimumWidth(left_min_width)
+
+        left_sidebar.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
+
+        # ========================================================
+        # SIDEBAR DX
+        # ========================================================
+
+        self.right_control_panel.setMinimumWidth(260)
+        self.right_control_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
+
+        # ========================================================
+        # GRAFICO CENTRALE
+        # ========================================================
+
+        self.plot_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
+
+        # Tutte e tre le colonne rimangono ridimensionabili.
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
+
+        splitter.setHandleWidth(6)
+
+        # Dimensioni iniziali.
+        # La memoria della sessione viene applicata successivamente.
+        splitter.setSizes([320, 1040, 320])
+
+
+
+        # Nessuna colonna viene resa fissa.
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
+
+        # Barre divisorie abbastanza visibili e trascinabili.
+        splitter.setHandleWidth(6)
+
+        # SX e DX hanno dimensioni iniziali simili.
+        splitter.setSizes([320, 1040, 320])
+
+        # Give all expandable space to the central visualization
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+
+        # Splitter handles remain movable
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
+        splitter.setHandleWidth(6)
+
+        # Nessuna colonna può essere collassata accidentalmente.
+        splitter.setChildrenCollapsible(False)
+
+        # Initial sizes only -- user can resize all three columns
+        # Dimensioni iniziali: pannelli laterali uguali.
+        # Lo splitter rimane completamente ridimensionabile.
+        splitter.setSizes([320, 1040, 320])
+
         
+        # Ripristina dimensioni colonne dell'ultima sessione
+        saved_splitter = self.ui_settings.value("splitter_state")
+        if saved_splitter is not None:
+            try:
+                splitter.restoreState(saved_splitter)
+            except Exception:
+                pass
+
         main_layout.addWidget(splitter)
         main_widget.setLayout(main_layout)
         self.setCentralWidget(splitter)  # Make splitter the central widget
         
         # Visualization styling
-        self.plot_widget.setBackground(self.config.viz_config.plot_background)
-        self.plot_widget.setMinimumSize(
-            PerformanceSettings.MIN_PLOT_WIDTH, 
-            PerformanceSettings.MIN_PLOT_HEIGHT
+        # Nessun minimo artificiale: il grafico si adatta allo spazio
+        # disponibile senza impedire il ridimensionamento della finestra.
+        self.plot_widget.setMinimumSize(1, 1)
+        # Il grafico non impone una dimensione minima alla finestra.
+        # La larghezza disponibile viene gestita dallo splitter.
+        self.plot_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
         )
+
+        self.plot_widget.setBackground(self.config.viz_config.plot_background)
     
     def _connect_event_handlers(self) -> None:
         """Connect all UI controls to their callback functions."""
@@ -408,9 +531,9 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
         self.info_panel.save_csv_btn.clicked.connect(self.save_csv_dialog)
         
         # Constraint lock controls
-        self.control_panel.lock_u_cb.stateChanged.connect(self.on_lock_u_changed)
-        self.control_panel.lock_nu_cb.stateChanged.connect(self.on_lock_nu_changed)
-        self.control_panel.lock_re_cb.stateChanged.connect(self.on_lock_re_changed)
+
+        # Initial Reynolds lock state:
+        # checked/blue = locked = not editable
         self.control_panel.apply_precision_btn.clicked.connect(self.update_precision)
         self.control_panel.apply_grid_btn.clicked.connect(self.update_grid_resolution)
         self.control_panel.apply_grid_type_btn.clicked.connect(self.update_grid_type)
@@ -543,6 +666,8 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
         
         if hasattr(self.control_panel, 'flow_combo'):
             self.control_panel.flow_combo.currentTextChanged.connect(self.on_flow_type_selected)
+
+        self.control_panel.backend_combo.currentIndexChanged.connect(self.on_backend_changed)
         
         if hasattr(self.control_panel, 'obstacle_button_group') and self.control_panel.obstacle_button_group:
             # Radio buttons are connected in ui_components.py via buttonClicked signal
@@ -569,7 +694,8 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
             'data_ready': self.handle_simulation_data,
             'fps_update': self.update_simulation_fps_display,
             'profiling_update': self.handle_profiling_update,
-            'metrics_ready': self.handle_metrics_data
+            'metrics_ready': self.handle_metrics_data,
+                    'failed': self.handle_simulation_failure
         }
         
         # Keyboard shortcuts
@@ -659,14 +785,8 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
         # Block signal during initial setup to prevent automatic triggering
         self.control_panel.adaptive_dt_checkbox.blockSignals(True)
         # Force checkbox to unchecked state to match params.py default
-        self.control_panel.adaptive_dt_checkbox.setChecked(False)
+        self.control_panel.adaptive_dt_checkbox.setChecked(self.solver.sim_params.adaptive_dt)
         self.control_panel.adaptive_dt_checkbox.blockSignals(False)
-        
-        # Force adaptive_dt=False in solver params and recompile JIT
-        self.solver.sim_params.adaptive_dt = False
-        jax.clear_caches()
-        self.solver._step_jit = self.solver.get_step_jit()
-        print(f"Forced adaptive_dt=False and recompiled _step_jit")
         
         # Initialize NACA controls with current solver values
         if hasattr(self.control_panel, 'angle_spinbox') and self.control_panel.angle_spinbox is not None:
@@ -745,11 +865,43 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
     # Simulation Control
     # -------------------------------------------------------------------------
     
+    def on_backend_changed(self, _index=None) -> None:
+        """Switch worker backends while keeping the production CFD solver intact."""
+        backend = self.control_panel.backend_combo.currentData()
+        self.refresh_timer.stop()
+        try:
+            self.sim_controller.stop_simulation()
+        except Exception as exc:
+            logger.warning("Backend switch cleanup failed: %s", exc)
+        self.is_paused = False
+        self.control_panel.start_btn.setEnabled(True)
+        self.control_panel.pause_btn.setEnabled(False)
+        is_fno = backend == "physicsnemo"
+        self.control_panel.physicsnemo_case_widget.setVisible(is_fno)
+        self.control_panel.backend_status_label.setText(
+            "Active: PhysicsNeMo FNO (surrogate v1)" if is_fno else "Active: AeroJAX CFD"
+        )
+        self.sim_controller.configure_backend(backend)
+
+    def _selected_physicsnemo_case(self):
+        velocity, reynolds = self.control_panel.physicsnemo_condition_combo.currentData()
+        return {
+            "geometry_id": self.control_panel.physicsnemo_geometry_combo.currentData(),
+            "U_inf": float(velocity), "Re": float(reynolds),
+        }
+
     def start_simulation(self) -> None:
         """Begin or resume the fluid simulation."""
         try:
+            if not self.is_paused:
+                backend = self.control_panel.backend_combo.currentData()
+                case = self._selected_physicsnemo_case() if backend == "physicsnemo" else None
+                self.sim_controller.configure_backend(backend, case)
+                if backend == "physicsnemo":
+                    self.control_panel.backend_status_label.setText("PhysicsNeMo FNO: loading checkpoint…")
             # If we're paused, just resume
-            if self.is_paused:
+            if (self.is_paused and self.sim_controller.simulation_worker is not None
+                    and self.sim_controller.simulation_worker.running):
                 self.sim_controller.resume_simulation()
                 self.is_paused = False
             else:
@@ -758,12 +910,17 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
                     'data_ready': self.handle_simulation_data,
                     'fps_update': self.update_simulation_fps_display,
                     'profiling_update': self.handle_profiling_update,
-                    'metrics_ready': self.handle_metrics_data
+                    'metrics_ready': self.handle_metrics_data,
+                    'failed': self.handle_simulation_failure
                 })
 
+            self.is_paused = False
             self.on_simulation_started()  # Lock x-position slider
             self.control_panel.start_btn.setEnabled(False)
             self.control_panel.pause_btn.setEnabled(True)
+            self.control_panel.backend_combo.setEnabled(False)
+            self.control_panel.physicsnemo_geometry_combo.setEnabled(False)
+            self.control_panel.physicsnemo_condition_combo.setEnabled(False)
             refresh_interval = int(1000 / self.config.viz_config.target_vis_fps)
             self.refresh_timer.start(refresh_interval)
 
@@ -773,7 +930,29 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
             traceback.print_exc()
             self.control_panel.start_btn.setEnabled(True)
             self.control_panel.pause_btn.setEnabled(False)
+            self.control_panel.backend_combo.setEnabled(True)
+            self.control_panel.physicsnemo_geometry_combo.setEnabled(True)
+            self.control_panel.physicsnemo_condition_combo.setEnabled(True)
     
+    def handle_simulation_failure(self, source, message):
+        if source is not self.sim_controller.simulation_worker:
+            return
+        logger.error("Simulation stopped after failure: %s", message)
+        self.refresh_timer.stop()
+        self.sim_controller.stop_simulation()
+        self.is_paused = False
+        self.control_panel.start_btn.setEnabled(True)
+        self.control_panel.pause_btn.setEnabled(False)
+        self.control_panel.backend_combo.setEnabled(True)
+        self.control_panel.physicsnemo_geometry_combo.setEnabled(True)
+        self.control_panel.physicsnemo_condition_combo.setEnabled(True)
+        QMessageBox.critical(
+            self, "Solver backend error",
+            f"The active backend stopped:\n\n{message}\n\nAeroJAX CFD remains available."
+        )
+        if self.control_panel.backend_combo.currentData() == "physicsnemo":
+            self.control_panel.backend_combo.setCurrentIndex(0)
+
     def pause_simulation(self) -> None:
         """Pause the fluid simulation."""
         self.sim_controller.pause_simulation()
@@ -782,6 +961,9 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
         self.on_simulation_stopped()  # Unlock x-position slider
         self.control_panel.start_btn.setEnabled(True)
         self.control_panel.pause_btn.setEnabled(False)
+        self.control_panel.backend_combo.setEnabled(True)
+        self.control_panel.physicsnemo_geometry_combo.setEnabled(True)
+        self.control_panel.physicsnemo_condition_combo.setEnabled(True)
         self.is_paused = True  # Track that we're paused, not stopped
     
     def full_reset_to_initial(self) -> None:
@@ -876,12 +1058,12 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
         self.control_panel.u_input.setValue(ic['flow']['U_inf'])
         self.control_panel.nu_input.setValue(ic['flow']['nu'])
         self.control_panel.re_input.setValue(int(ic['flow']['Re']))
-        self.control_panel.lock_u_cb.setChecked(ic['flow']['lock_U'])
-        self.control_panel.lock_nu_cb.setChecked(ic['flow']['lock_nu'])
-        self.control_panel.lock_re_cb.setChecked(ic['flow']['lock_Re'])
+        mode = 'U' if not ic['flow']['lock_U'] else ('ν' if not ic['flow']['lock_nu'] else 'Re')
+        self.control_panel.re_auto_combo.setCurrentText(mode)
         
         # Reset iteration counter
         self.solver.iteration = 0
+        self.solver.simulated_time = 0.0
         self.solver.history = {
             'time': [0.0],
             'dt': [self.solver.dt],
@@ -905,6 +1087,9 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
         # Update button states
         self.control_panel.start_btn.setEnabled(True)
         self.control_panel.pause_btn.setEnabled(False)
+        self.control_panel.backend_combo.setEnabled(True)
+        self.control_panel.physicsnemo_geometry_combo.setEnabled(True)
+        self.control_panel.physicsnemo_condition_combo.setEnabled(True)
         
         print("Full reset complete - GUI and solver restored to initial state")
     
@@ -946,6 +1131,7 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
             # Reset solver state without recreating solver object
             # Reset iteration counter
             self.solver.iteration = 0
+            self.solver.simulated_time = 0.0
             
             # Reset history
             self.solver.history = {
@@ -986,9 +1172,61 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
             else:
                 # Baseline solver uses flow-specific initializers
                 if flow_type == 'von_karman':
-                    self.solver._initialize_von_karman_flow()
-                    # Recompute mask with current parameters
+                    # Recompute the currently selected obstacle first.
                     self.solver.mask = self.solver._compute_mask()
+
+                    # WIND TUNNEL RESET:
+                    # Reset means an empty tunnel with flow entering only
+                    # from the inlet. Pause, instead, preserves/freeze state.
+                    import jax.numpy as jnp
+
+                    U_inf = self.solver.flow.U_inf
+
+                    if self.solver.sim_params.grid_type == 'mac':
+                        self.solver.u = jnp.zeros(
+                            (self.solver.grid.nx + 1, self.solver.grid.ny)
+                        )
+                        self.solver.v = jnp.zeros(
+                            (self.solver.grid.nx, self.solver.grid.ny + 1)
+                        )
+
+                        # Only inlet starts with the requested wind velocity.
+                        self.solver.u = self.solver.u.at[0, :].set(U_inf)
+
+                    else:
+                        self.solver.u = jnp.zeros(
+                            (self.solver.grid.nx, self.solver.grid.ny)
+                        )
+                        self.solver.v = jnp.zeros(
+                            (self.solver.grid.nx, self.solver.grid.ny)
+                        )
+
+                        # Only left boundary contains incoming wind.
+                        self.solver.u = self.solver.u.at[0, :].set(U_inf)
+
+                        # Keep solid regions at zero velocity.
+                        if getattr(self.solver, 'mask', None) is not None:
+                            self.solver.u = self.solver.u * self.solver.mask
+                            self.solver.v = self.solver.v * self.solver.mask
+
+                    # Completely clear dynamic state.
+                    self.solver.current_pressure = jnp.zeros(
+                        (self.solver.grid.nx, self.solver.grid.ny)
+                    )
+
+                    self.solver.c = jnp.zeros(
+                        (self.solver.grid.nx, self.solver.grid.ny)
+                    )
+
+                    self.solver.u_prev = jnp.copy(self.solver.u)
+                    self.solver.v_prev = jnp.copy(self.solver.v)
+
+                    self.solver.startup_ramp_steps = 0
+
+                    print(
+                        f"Wind tunnel cleared: domain velocity=0, "
+                        f"inlet={U_inf:.3f} m/s"
+                    )
                 elif flow_type == 'lid_driven_cavity':
                     self.solver._initialize_cavity_flow()
                     self.solver.mask = self.solver._compute_mask()
@@ -1005,7 +1243,64 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
             self.control_panel.start_btn.setEnabled(True)
             self.control_panel.pause_btn.setEnabled(False)
             
-            print("Reset complete - flow fields reinitialized with current GUI parameters")
+            # FORCE reset state directly into visualization
+            import numpy as np
+
+            u_np = np.asarray(self.solver.u)
+            v_np = np.asarray(self.solver.v)
+
+            if self.solver.sim_params.grid_type == 'mac':
+                if u_np.shape[0] == self.solver.grid.nx + 1:
+                    u_vis = 0.5 * (u_np[:-1, :] + u_np[1:, :])
+                else:
+                    u_vis = u_np
+
+                if v_np.shape[1] == self.solver.grid.ny + 1:
+                    v_vis = 0.5 * (v_np[:, :-1] + v_np[:, 1:])
+                else:
+                    v_vis = v_np
+            else:
+                u_vis = u_np
+                v_vis = v_np
+
+            vel_mag = np.sqrt(u_vis ** 2 + v_vis ** 2)
+
+            vort = np.zeros_like(vel_mag)
+            div = np.zeros_like(vel_mag)
+            pressure = np.zeros_like(vel_mag)
+            scalar = np.zeros_like(vel_mag)
+
+            # Remove stale data from the simulation worker
+            self.sim_controller.latest_data = None
+            self.sim_controller.latest_metrics = None
+            self.sim_controller.simulation_step_counter = 0
+            self.sim_controller.should_update_visualization = False
+
+            # Write reset state directly to plots
+            self.flow_viz.update_visualization(
+                vel_mag,
+                vort,
+                pressure,
+                div,
+                scalar,
+                self.config.viz_config.show_velocity,
+                self.config.viz_config.show_vorticity,
+                self.config.viz_config.show_pressure,
+                self.config.viz_config.show_dye
+            )
+
+            # Stay stopped until Start
+            self.refresh_timer.stop()
+
+            print(
+                "RESET_DIRECT_OK "
+                f"vel_min={float(vel_mag.min()):.6f} "
+                f"vel_max={float(vel_mag.max()):.6f} "
+                f"vel_mean={float(vel_mag.mean()):.6f}"
+            )
+            self.control_panel.backend_combo.setEnabled(True)
+            self.control_panel.physicsnemo_geometry_combo.setEnabled(True)
+            self.control_panel.physicsnemo_condition_combo.setEnabled(True)
             
         except Exception as e:
             print(f"ERROR during reset: {e}")
@@ -1776,7 +2071,7 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
         # Recompile solver with new pressure solver
         if hasattr(self.solver, '_step_jit'):
             import jax
-            jax.clear_caches()
+            self.solver._jit_cache.clear()
             self.solver._step_jit = self.solver.get_step_jit()
             print("Solver recompiled with new pressure solver")
 
@@ -1819,7 +2114,7 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
             
             # Clear JAX cache to recompile with new fast_mode setting
             import jax
-            jax.clear_caches()
+            self.solver._jit_cache.clear()
             
             # Clear JIT cache to force recompilation with new fast_mode
             if hasattr(self.solver, '_jit_cache'):
@@ -2058,36 +2353,11 @@ class BaselineViewerRefactored(QMainWindow, ParameterHandlers, DisplayManager, F
     
     def on_ldc_re_selected(self, re_value: int) -> None:
         """Handle LDC benchmark Re radio button selection."""
-        # Apply the Reynolds number change to solver
-        self.solver.flow.Re = float(re_value)
-        self.solver.flow.resolve()  # Recompute viscosity based on new Re
-        
-        # Update solver constraints
-        self.solver.flow.constraints.lock_Re = True
-        self.solver.flow.constraints.lock_nu = False
-        self.solver.flow.constraints.lock_U = True
-        
-        print(f"Applied LDC benchmark Re={re_value} to solver")
-        
-        # Enable LDC validation overlay
+        self.control_panel.re_input.setValue(float(re_value))
+        self.control_panel.re_auto_combo.setCurrentText('ν')
+        self.update_reynolds_number()
         self.enable_ldc_validation(re_value)
-        
-        # Trigger solver recompilation with new parameters
-        if hasattr(self, 'sim_controller'):
-            self.sim_controller.stop_simulation()
-        self.refresh_timer.stop()
-        
-        # Reset UI controls
-        self.control_panel.start_btn.setEnabled(True)
-        self.control_panel.pause_btn.setEnabled(False)
-        
-        # Recompile solver with new viscosity
-        try:
-            self.solver._step_jit = self.solver.get_step_jit()
-            print(f"Solver recompiled for Re={re_value}")
-        except Exception as e:
-            print(f"Warning: Solver recompilation failed: {e}")
-    
+
     def toggle_adaptive_timestep(self, state) -> None:
         """Switch between fixed and adaptive timestep modes."""
         is_adaptive = (state == 2)
@@ -2317,7 +2587,7 @@ def main() -> None:
         app.processEvents()
 
         # Clear JAX caches to force recompilation with updated code
-        jax.clear_caches()
+        # No global cache invalidation is needed at application startup.
 
         solver = BaselineSolver(
             grid, flow, geometry, simulation_params,
@@ -2327,7 +2597,7 @@ def main() -> None:
         # Force adaptive_dt=False and recompile JIT to prevent dt mismatch
         try:
             solver.sim_params.adaptive_dt = False
-            jax.clear_caches()
+            solver._jit_cache.clear()
             solver._step_jit = solver.get_step_jit()
             print(f"Forced adaptive_dt=False and recompiled _step_jit")
         except Exception as e:

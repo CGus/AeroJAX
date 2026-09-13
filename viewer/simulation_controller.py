@@ -3,6 +3,7 @@ Simulation controller for Baseline Navier-Stokes Viewer
 Handles simulation threading, data management, and worker communication
 """
 
+import copy
 import sys
 import time
 import threading
@@ -12,7 +13,7 @@ import numpy as np
 import jax.numpy as jnp
 import jax
 import multiprocessing.shared_memory as shm
-from PyQt6.QtCore import QObject, pyqtSignal, Qt
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer, QCoreApplication, Qt
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,35 @@ class SharedData:
         self.array = np.ndarray(shape, dtype=dtype, buffer=self.shm.buf)
     
     def cleanup(self):
-        """Clean up shared memory"""
-        if hasattr(self, 'shm'):
-            self.shm.close()
-            self.shm.unlink()
+        """Idempotently close and unlink shared memory."""
 
+        if getattr(self, "_cleaned", False):
+            return
+
+        self._cleaned = True
+
+        shm_obj = getattr(self, "shm", None)
+
+        if shm_obj is None:
+            return
+
+        try:
+            shm_obj.close()
+        except (FileNotFoundError, BufferError):
+            pass
+        except Exception as exc:
+            logger.debug(
+                f"Shared memory close ignored: {exc}"
+            )
+
+        try:
+            shm_obj.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.debug(
+                f"Shared memory unlink ignored: {exc}"
+            )
 
 class MetricsWorker(QObject):
     """Separate thread for metrics computation to avoid blocking simulation"""
@@ -45,18 +70,59 @@ class MetricsWorker(QObject):
         self.frame_count = 0
 
     def start(self):
-        """Start the metrics computation thread"""
+        """Start the metrics worker exactly once."""
+
+        if (
+            self.thread is not None
+            and self.thread.is_alive()
+        ):
+            logger.debug(
+                "Metrics worker start ignored: already running"
+            )
+            return
+
         self.running = True
         self.paused = False
-        self.thread = threading.Thread(target=self.run_metrics, daemon=True)
+
+        self.thread = threading.Thread(
+            target=self.run_metrics,
+            daemon=True,
+            name="AeroJAX-MetricsWorker"
+        )
+
         self.thread.start()
+
         logger.info("Metrics worker started")
 
     def stop(self):
-        """Stop the metrics computation thread"""
+        """Stop the metrics worker safely."""
+
+        thread = self.thread
+
+        if (
+            not self.running
+            and (
+                thread is None
+                or not thread.is_alive()
+            )
+        ):
+            return
+
         self.running = False
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=1.0)
+        self.paused = False
+
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=1.0)
+
+        if thread is not None and thread.is_alive():
+            raise RuntimeError("Metrics worker is still stopping; state was retained")
+        self.thread = None
+        with self.data_queue.mutex:
+            self.data_queue.queue.clear()
         logger.info("Metrics worker stopped")
 
     def pause(self):
@@ -76,7 +142,10 @@ class MetricsWorker(QObject):
                     self.data_queue.get_nowait()
                 except queue.Empty:
                     pass
-            self.data_queue.put((u, v, pressure, mask, iteration), block=False)
+            snapshot = copy.copy(self.solver)
+            snapshot.flow = copy.copy(self.solver.flow)
+            snapshot.sim_params = copy.copy(self.solver.sim_params)
+            self.data_queue.put((u, v, pressure, mask, iteration, snapshot), block=False)
         except queue.Full:
             pass  # Drop frame if queue is full
 
@@ -93,7 +162,7 @@ class MetricsWorker(QObject):
 
             try:
                 # Get data from queue with timeout
-                u, v, pressure, mask, iteration = self.data_queue.get(timeout=0.1)
+                u, v, pressure, mask, iteration, solver = self.data_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
@@ -104,29 +173,9 @@ class MetricsWorker(QObject):
                 pressure_np = np.array(pressure)
                 mask_np = np.array(mask)
                 
-                # Compute pressure residual to check solver convergence
-                dx = self.solver.grid.dx
-                dy = self.solver.grid.dy
-                dt = self.solver.dt
-                grid_type = getattr(self.solver.sim_params, 'grid_type', 'collocated')
-                if grid_type == 'mac':
-                    from solver.operators_mac import divergence_nonperiodic_staggered
-                    div_star = divergence_nonperiodic_staggered(u, v, dx, dy)
-                else:
-                    div_star = divergence_nonperiodic(u, v, dx, dy)
-                rhs = div_star / dt
-                laplacian_p = laplacian_nonperiodic_x(pressure, dx, dy)
-                pressure_residual = np.linalg.norm(np.array(laplacian_p) - np.array(rhs))
-                rhs_norm = np.linalg.norm(np.array(rhs))
-                relative_residual = pressure_residual / (rhs_norm + 1e-10)
-                
-                if iteration < 5 or iteration % 1000 == 0:
-                    logger.debug(f"Pressure residual (iter {iteration}): {pressure_residual:.8e}, relative: {relative_residual:.8e}")
-                    if relative_residual > 1e-3:
-                        logger.warning(f"Relative pressure residual > 1e-3 - solver may not be converging!")
-
+                dx, dy = solver.grid.dx, solver.grid.dy
                 # For MAC grid, interpolate velocities to cell centers before computing metrics
-                grid_type = getattr(self.solver.sim_params, 'grid_type', 'collocated')
+                grid_type = getattr(solver.sim_params, 'grid_type', 'collocated')
                 # Save original staggered arrays for divergence computation (convert to numpy first)
                 u_np_staggered = np.array(u_np) if grid_type == 'mac' else None
                 v_np_staggered = np.array(v_np) if grid_type == 'mac' else None
@@ -137,12 +186,12 @@ class MetricsWorker(QObject):
                     v_np = 0.5 * (v_np[:, :-1] + v_np[:, 1:])
 
                 # Check if we should compute metrics based on frame skip (match solver behavior)
-                should_compute_metrics = (iteration % self.solver.metrics_frame_skip == 0) if self.solver.metrics_frame_skip > 1 else True
+                should_compute_metrics = True  # Scheduling is owned by SimulationWorker.
 
                 # Compute error metrics (only on frames matching frame skip)
-                if self.solver.iteration > 0 and should_compute_metrics:
-                    u_prev_np = np.array(self.solver.u_prev)
-                    v_prev_np = np.array(self.solver.v_prev)
+                if solver.iteration > 0 and should_compute_metrics:
+                    u_prev_np = np.array(solver.u_prev)
+                    v_prev_np = np.array(solver.v_prev)
 
                     # For MAC grid, interpolate previous velocities to cell centers (current already interpolated above)
                     if grid_type == 'mac':
@@ -154,8 +203,8 @@ class MetricsWorker(QObject):
                     delta_u = u_np - u_prev_np
                     delta_v = v_np - v_prev_np
 
-                    dx = float(self.solver.grid.dx)
-                    dy = float(self.solver.grid.dy)
+                    dx = float(solver.grid.dx)
+                    dy = float(solver.grid.dy)
 
                     l2_delta_u = np.sqrt(np.sum(delta_u**2) * dx * dy)
                     l2_delta_v = np.sqrt(np.sum(delta_v**2) * dx * dy)
@@ -166,20 +215,20 @@ class MetricsWorker(QObject):
                     max_delta_total = np.maximum(max_delta_u, max_delta_v)
 
                     # Calculate velocity change magnitude
-                    if self.solver.sim_params.grid_type == 'mac':
+                    if solver.sim_params.grid_type == 'mac':
                         # For MAC grid, skip delta_mag computation due to shape issues
-                        delta_mag = np.zeros((self.solver.grid.nx, self.solver.grid.ny))
+                        delta_mag = np.zeros((solver.grid.nx, solver.grid.ny))
                     else:
                         delta_mag = np.sqrt(delta_u**2 + delta_v**2)
 
-                    u_rms = np.sqrt(np.sum(u_np**2) * dx * dy / (self.solver.grid.nx * self.solver.grid.ny))
-                    v_rms = np.sqrt(np.sum(v_np**2) * dx * dy / (self.solver.grid.nx * self.solver.grid.ny))
+                    u_rms = np.sqrt(np.sum(u_np**2) * dx * dy / (solver.grid.nx * solver.grid.ny))
+                    v_rms = np.sqrt(np.sum(v_np**2) * dx * dy / (solver.grid.nx * solver.grid.ny))
                     vel_rms = np.sqrt(u_rms**2 + v_rms**2) + 1e-8
 
-                    rel_delta = l2_delta_total / (vel_rms * np.sqrt(float(self.solver.grid.lx) * float(self.solver.grid.ly)))
+                    rel_delta = l2_delta_total / (vel_rms * np.sqrt(float(solver.grid.lx) * float(solver.grid.ly)))
 
                     # Compute divergence only in pure fluid region (mask > 0.99) to exclude IBM transition zone
-                    if self.solver.sim_params.grid_type == 'mac':
+                    if solver.sim_params.grid_type == 'mac':
                         # Use proper staggered divergence for MAC grid with original staggered arrays
                         from solver.operators_mac import divergence_nonperiodic_staggered
                         div = divergence_nonperiodic_staggered(u_np_staggered, v_np_staggered, dx, dy)
@@ -195,7 +244,7 @@ class MetricsWorker(QObject):
 
                     error_metrics = {
                         'l2_change': float(l2_delta_total),
-                        'rms_change': float(l2_delta_total / np.sqrt(self.solver.grid.nx * self.solver.grid.ny)),
+                        'rms_change': float(l2_delta_total / np.sqrt(solver.grid.nx * solver.grid.ny)),
                         'max_change': float(max_delta_total),
                         'change_99p': float(np.percentile(delta_mag, 99)),
                         'rel_change': float(rel_delta),
@@ -222,23 +271,23 @@ class MetricsWorker(QObject):
                 # Compute airfoil metrics if enabled and frame skip allows
                 airfoil_metrics = None
                 self.frame_count += 1
-                if self.solver.compute_airfoil_metrics and self.solver.sim_params.flow_type == 'von_karman' and should_compute_metrics:
+                if solver.compute_airfoil_metrics and solver.sim_params.flow_type == 'von_karman' and should_compute_metrics:
                     try:
-                        X_np = np.array(self.solver.grid.X)
-                        Y_np = np.array(self.solver.grid.Y)
+                        X_np = np.array(solver.grid.X)
+                        Y_np = np.array(solver.grid.Y)
                         # u_np and v_np are already interpolated to cell centers for MAC grid above
 
                         # Compute vorticity for circulation-based force calculation
                         from solver.operators import vorticity, vorticity_nonperiodic
-                        grid_type = getattr(self.solver.sim_params, 'grid_type', 'collocated')
+                        grid_type = getattr(solver.sim_params, 'grid_type', 'collocated')
                         if grid_type == 'mac':
                             from solver.operators_mac import vorticity_staggered, vorticity_nonperiodic_staggered
-                            if self.solver.sim_params.flow_type == 'von_karman' or self.solver.sim_params.flow_type == 'lid_driven_cavity':
+                            if solver.sim_params.flow_type == 'von_karman' or solver.sim_params.flow_type == 'lid_driven_cavity':
                                 w_np = np.array(vorticity_nonperiodic_staggered(u, v, dx, dy))
                             else:
                                 w_np = np.array(vorticity_staggered(u, v, dx, dy))
                         else:
-                            if self.solver.sim_params.flow_type == 'von_karman' or self.solver.sim_params.flow_type == 'lid_driven_cavity':
+                            if solver.sim_params.flow_type == 'von_karman' or solver.sim_params.flow_type == 'lid_driven_cavity':
                                 w_np = np.array(vorticity_nonperiodic(u_np, v_np, dx, dy))
                             else:
                                 w_np = np.array(vorticity(u_np, v_np, dx, dy))
@@ -246,32 +295,32 @@ class MetricsWorker(QObject):
                         stag_x = find_stagnation_point(u_np, v_np, mask_np, pressure_np, X_np, dx)
                         sep_x = find_separation_point(u_np, v_np, mask_np, X_np, dx, dy)
 
-                        chord_length = getattr(self.solver.sim_params, 'naca_chord', 2.0)
-                        airfoil_x = getattr(self.solver.sim_params, 'naca_x', 5.0)
-                        airfoil_y = getattr(self.solver.sim_params, 'naca_y', 2.5)
+                        chord_length = getattr(solver.sim_params, 'naca_chord', 2.0)
+                        airfoil_x = getattr(solver.sim_params, 'naca_x', 5.0)
+                        airfoil_y = getattr(solver.sim_params, 'naca_y', 2.5)
 
                         # Use circulation-based force calculation (IBM-appropriate)
                         cl, cd = compute_forces_ibm(u_np, v_np, w_np, X_np, Y_np, mask_np,
-                                                  dx, dy, self.solver.flow.U_inf,
+                                                  dx, dy, solver.flow.U_inf,
                                                   chord_length, airfoil_x, airfoil_y,
-                                                  self.solver.grid.lx,
+                                                  solver.grid.lx,
                                                   grid_type=grid_type)
 
                         rho = 1.0
                         surface = get_airfoil_surface_mask(mask_np, dx, threshold=0.1)
                         p_inf = 0.0
-                        q_inf = 0.5 * rho * self.solver.flow.U_inf**2
+                        q_inf = 0.5 * rho * solver.flow.U_inf**2
                         cp = (pressure_np - p_inf) / q_inf
                         cp_surface = np.where(surface, cp, np.inf)
                         cp_min = float(np.min(cp_surface))
 
-                        airfoil_x = getattr(self.solver.sim_params, 'naca_x', 2.5)
+                        airfoil_x = getattr(solver.sim_params, 'naca_x', 2.5)
                         wake_x = airfoil_x + chord_length
                         wake_x_idx = int(wake_x / dx)
                         wake_deficit = 0.0
-                        if 0 <= wake_x_idx < self.solver.grid.nx:
+                        if 0 <= wake_x_idx < solver.grid.nx:
                             u_wake = u_np[wake_x_idx, :]
-                            wake_deficit = float(self.solver.flow.U_inf - np.mean(u_wake[mask_np[wake_x_idx, :] > 0.5]))
+                            wake_deficit = float(solver.flow.U_inf - np.mean(u_wake[mask_np[wake_x_idx, :] > 0.5]))
 
                         airfoil_metrics = {
                             'CL': cl,
@@ -291,9 +340,13 @@ class MetricsWorker(QObject):
                 if should_compute_metrics:
                     metrics_data = {
                         'error_metrics': error_metrics,
-                        'airfoil_metrics': airfoil_metrics
+                        'airfoil_metrics': airfoil_metrics,
+                        'time': getattr(solver, 'simulated_time', iteration * solver.dt),
+                        'dt': solver.dt,
+                        'source': self
                     }
-                    self.metrics_ready.emit(metrics_data)
+                    if self.running and not self.paused:
+                        self.metrics_ready.emit(metrics_data)
 
             except Exception as e:
                 logger.error(f"Error in metrics computation: {e}")
@@ -303,6 +356,8 @@ class MetricsWorker(QObject):
 
 class SimulationWorker(QObject):
     """Separate thread for simulation computation using Python threading"""
+    failed = pyqtSignal(object, str)
+    angle_changed = pyqtSignal(float)
     data_ready = pyqtSignal(object)  # Signal when new data is ready
     fps_update = pyqtSignal(int)     # Signal for FPS updates
     profiling_update = pyqtSignal(float, float, float, float)  # Signal for profiling data (solver_ms, interp_ms, total_ms, sim_fps)
@@ -328,20 +383,46 @@ class SimulationWorker(QObject):
         self.sim_fps_counter = 0
         self.last_sim_fps_time = time.time()
         
-        # Initialize shared memory buffers for zero-copy transfer
-        nx, ny = solver.grid.nx, solver.grid.ny
-        self.shared_buffers = {
-            'u': SharedData((nx, ny), np.float32),
-            'v': SharedData((nx, ny), np.float32),
-            'vort': SharedData((nx, ny), np.float32),
-            'vel_mag': SharedData((nx, ny), np.float32)
-        }
-        
+        self.shared_buffers = {}
+        self.pending_frame = False
+        self.step_lock = threading.RLock()
+        self.active_wall_time = 0.0
+        self.initial_sim_time = getattr(solver, 'simulated_time', solver.iteration * solver.dt)
+        self.sample_ui()
+        self.settings_timer = QTimer(self)
+        self.settings_timer.timeout.connect(self.sample_ui)
+        self.angle_changed.connect(self.show_angle, Qt.ConnectionType.QueuedConnection)
+
+    def sample_ui(self):
+        """Only called on the Qt thread; publish an immutable settings tuple."""
+        cp, ip, fv = self.control_panel, self.info_panel, self.flow_viz
+        diagnostics = ip.diagnostics_checkbox.isChecked() if ip else False
+        div = bool(fv and hasattr(fv, 'div_plot') and fv.div_plot.isVisible())
+        skip = max(1, int(ip.metrics_frame_skip_input.value())) if ip and hasattr(ip, 'metrics_frame_skip_input') else 100
+        dynamic = bool(cp and hasattr(cp, 'dynamic_airfoil_checkbox') and cp.dynamic_airfoil_checkbox.value() == 1)
+        motion = (cp.min_aoa_spinbox.value(), cp.max_aoa_spinbox.value(),
+                  cp.aoa_increment_spinbox.value(), cp.steps_per_increment_slider.value()) if dynamic else (0., 0., 0., 1)
+        pressure = bool(fv and hasattr(fv, 'pressure_plot') and fv.pressure_plot.isVisible())
+        self.ui_settings = (diagnostics, div, skip, dynamic, motion, pressure)
+
+    @pyqtSlot(float)
+    def show_angle(self, angle):
+        if not self.running:
+            return
+        for name, value in [('angle_spinbox', angle), ('angle_slider', int(angle * 10))]:
+            widget = getattr(self.control_panel, name, None)
+            if widget is not None:
+                widget.blockSignals(True)
+                widget.setValue(value)
+                widget.blockSignals(False)
+
     def start(self):
         """Start the simulation thread"""
         try:
             if self.thread is None or not self.thread.is_alive():
                 self.running = True
+                self.sample_ui()
+                self.settings_timer.start(100)
                 self.thread = threading.Thread(target=self.run_simulation, daemon=True)
                 self.thread.start()
                 logger.info("Simulation thread started")
@@ -358,6 +439,18 @@ class SimulationWorker(QObject):
 
         # Track iteration rate directly
         iteration_start_time = time.time()
+
+        # ------------------------------------------------------
+        # VWT VIEWPORT DECOUPLING
+        # CFD runs as fast as possible; GUI refresh is throttled
+        # independently.
+        # ------------------------------------------------------
+        last_viewport_emit_time = 0.0
+        last_metrics_iteration = -1000000
+        last_metrics_time = 0.0
+        batch_size = 1
+        viewport_target_fps = 30.0
+        viewport_emit_interval = 1.0 / viewport_target_fps
 
         # Dynamic airfoil motion state
         dynamic_aoa_enabled = False
@@ -380,35 +473,56 @@ class SimulationWorker(QObject):
                     break
                 
                 # Run simulation step with coefficient computation for airfoil metrics
+                cycle_start = time.perf_counter()
                 t_solver_start = time.time()
                 try:
                     # Get diagnostics setting from GUI
-                    compute_diagnostics = self.info_panel.diagnostics_checkbox.isChecked() if self.info_panel else True
+                    compute_diagnostics, compute_div, metrics_skip, is_dynamic, motion, compute_pressure = self.ui_settings
                     
                     # Always pass compute_diagnostics=False to avoid blocking - metrics computed in separate thread
                     # Only compute divergence if the divergence plot is visible
-                    compute_div = hasattr(self, 'flow_viz') and hasattr(self.flow_viz, 'div_plot') and self.flow_viz.div_plot.isVisible()
-                    u, v, vort, div = self.solver.step_for_visualization(
-                        compute_divergence=compute_div,
-                        compute_drag_lift=True,
-                        compute_diagnostics=False  # Metrics computed in separate thread
-                    )
+
+                    # Bounded device work independent of numerical dt and render cadence.
+                    cfd_substeps = batch_size if hasattr(self.solver, 'advance_steps') else 1
+                    with self.step_lock:
+                        if self.paused or not self.running:
+                            continue
+                        if hasattr(self.solver, 'advance_steps'):
+                            self.solver.advance_steps(cfd_substeps)
+                            # Bound asynchronous dispatch and measure completed numerical work.
+                            jax.block_until_ready((self.solver.u, self.solver.v))
+                        else:
+                            u, v, vort, div = self.solver.step_for_visualization(
+                                compute_divergence=compute_div, compute_drag_lift=False,
+                                compute_diagnostics=False)
+                        self.active_wall_time += time.perf_counter() - cycle_start
                 except Exception as step_error:
                     logger.error(f"Simulation step failed: {step_error}")
                     import traceback
                     traceback.print_exc()
                     
-                    # Check for specific LDC-related errors
-                    if "lid_driven_cavity" in str(step_error).lower() or "ldc" in str(step_error).lower():
-                        logger.warning("LDC-specific error detected, stopping simulation...")
-                        break
-                    
-                    time.sleep(0.01)  # Brief pause before retry
-                    continue  # Skip this step but continue simulation
+                    self.failed.emit(self, str(step_error))
+                    break
                 t_solver_end = time.time()
+                # Fit a batch into about 25 ms when the hardware permits it.
+                batch_size = max(1, min(32, int(.025 * cfd_substeps / max(t_solver_end - t_solver_start, 1e-6))))
                 
-                # Enqueue data for metrics worker if enabled and worker exists
-                if compute_diagnostics and self.metrics_worker:
+                # --------------------------------------------------
+                # METRICS THROTTLE
+                #
+                # Metrics require GPU -> CPU synchronization and must
+                # not run on every CFD cycle.
+                # --------------------------------------------------
+                if (
+                    (compute_diagnostics or self.solver.compute_airfoil_metrics)
+                    and self.metrics_worker
+                    and (
+                        self.solver.iteration - last_metrics_iteration >= metrics_skip
+                        and time.monotonic() - last_metrics_time >= 0.2
+                    )
+                ):
+                    last_metrics_iteration = self.solver.iteration
+                    last_metrics_time = time.monotonic()
                     self.metrics_worker.enqueue_data(
                         self.solver.u,
                         self.solver.v,
@@ -417,102 +531,175 @@ class SimulationWorker(QObject):
                         self.solver.iteration
                     )
                 
-                # Get divergence from solver history (already computed in JIT step)
-                if hasattr(self.solver, 'history') and 'rms_divergence' in self.solver.history and self.solver.history['rms_divergence']:
-                    div_rms = self.solver.history['rms_divergence'][-1]
-                else:
-                    div_rms = 0.0  # Fallback if not available
-                
-                # Interpolate MAC grid velocities to cell centers for visualization
-                t_interp_start = time.time()
-                grid_type = getattr(self.solver.sim_params, 'grid_type', 'collocated')
-                solver_type = getattr(self.solver.sim_params, 'solver_type', 'navier_stokes')
-                
-                # LBM always uses collocated grid, regardless of grid_type setting
-                if solver_type == 'lattice_boltzmann' or grid_type == 'collocated':
-                    # Collocated grid - use directly (LBM case)
-                    u_display = u
-                    v_display = v
-                    vort_display = vort
-                    try:
-                        vel_mag = jnp.sqrt(u**2 + v**2)
-                    except Exception as vel_error:
-                        logger.error(f"Velocity magnitude calculation failed: {vel_error}")
-                        vel_mag = jnp.zeros_like(u)  # Fallback value
-                    vel_mag_display = vel_mag
-                elif grid_type == 'mac':
-                    # MAC grid with traditional NS solver - interpolate staggered velocities
-                    u_center = 0.5 * (u[1:, :] + u[:-1, :])
-                    v_center = 0.5 * (v[:, 1:] + v[:, :-1])
-                    u_display = u_center
-                    v_display = v_center
-                    # Compute velocity magnitude from interpolated velocities
-                    vel_mag = jnp.sqrt(u_center**2 + v_center**2)
-                    vel_mag_display = vel_mag
-                    # Interpolate vorticity to cell centers if needed
-                    if vort.shape == (self.solver.grid.nx + 1, self.solver.grid.ny):
-                        vort_display = 0.5 * (vort[1:, :] + vort[:-1, :])
-                    elif vort.shape == (self.solver.grid.nx, self.solver.grid.ny + 1):
-                        vort_display = 0.5 * (vort[:, 1:] + vort[:, :-1])
-                    else:
-                        vort_display = vort
-                else:
-                    # Default to collocated treatment
-                    u_display = u
-                    v_display = v
-                    vort_display = vort
-                    try:
-                        vel_mag = jnp.sqrt(u**2 + v**2)
-                    except Exception as vel_error:
-                        logger.error(f"Velocity magnitude calculation failed: {vel_error}")
-                        vel_mag = jnp.zeros_like(u)  # Fallback value
-                    vel_mag_display = vel_mag
-                t_interp_end = time.time()
-                
-                # Create metadata dict with arrays directly
-                t_queue_start = time.time()
-                scalar_field = None
-                if hasattr(self.solver, 'lbm_params') and getattr(self.solver.lbm_params, 'enable_thermal', False):
-                    scalar_field = np.asarray(self.solver.T, dtype=np.float32) if hasattr(self.solver, 'T') else None
-                else:
-                    scalar_field = np.asarray(self.solver.c, dtype=np.float32) if hasattr(self.solver, 'c') else None
+                # --------------------------------------------------
+                # VIEWPORT UPDATE THROTTLE
+                #
+                # Do NOT force JAX -> NumPy transfers every CFD cycle.
+                # Only prepare display data when the viewport is due.
+                # --------------------------------------------------
+                now_viewport = time.time()
 
-                data = {
-                    'time': self.solver.iteration * self.solver.dt,
-                    'iteration': self.solver.iteration,
-                    'rms_divergence': div_rms,
-                    'u': np.asarray(u_display, dtype=np.float32),
-                    'v': np.asarray(v_display, dtype=np.float32),
-                    'vort': np.asarray(vort_display, dtype=np.float32),
-                    'vel_mag': np.asarray(vel_mag_display, dtype=np.float32),
-                    'div': np.asarray(div, dtype=np.float32) if div is not None else None,
-                    'scalar': scalar_field,
-                }
-                t_queue_end = time.time()
-                
-                # Emit signal for UI update (every iteration for smooth visualization)
-                t_signal_start = time.time()
-                if self.running:
-                    try:
-                        self.data_ready.emit(data)
-                    except Exception as emit_error:
-                        logger.error(f"Signal emission failed: {emit_error}")
-                        import traceback
-                        traceback.print_exc()
-                t_signal_end = time.time()
-                
+                should_emit_viewport = (
+                    (now_viewport - last_viewport_emit_time)
+                    >= viewport_emit_interval
+                    and not self.pending_frame
+                )
+
+                if should_emit_viewport:
+                    if hasattr(self.solver, 'visualization_fields'):
+                        u, v, vort, div = self.solver.visualization_fields(compute_divergence=compute_div)
+
+                    # Get divergence from solver history.
+                    if (
+                        hasattr(self.solver, 'history')
+                        and 'rms_divergence' in self.solver.history
+                        and self.solver.history['rms_divergence']
+                    ):
+                        div_rms = (
+                            self.solver.history[
+                                'rms_divergence'
+                            ][-1]
+                        )
+                    else:
+                        div_rms = 0.0
+
+                    # ----------------------------------------------
+                    # Prepare visualization fields only now.
+                    # ----------------------------------------------
+                    t_interp_start = time.time()
+
+                    grid_type = getattr(
+                        self.solver.sim_params,
+                        'grid_type',
+                        'collocated'
+                    )
+
+                    solver_type = getattr(
+                        self.solver.sim_params,
+                        'solver_type',
+                        'navier_stokes'
+                    )
+
+                    if (
+                        solver_type == 'lattice_boltzmann'
+                        or grid_type == 'collocated'
+                    ):
+                        u_display = u
+                        v_display = v
+                        vort_display = vort
+                        vel_mag_display = jnp.sqrt(
+                            u * u + v * v
+                        )
+
+                    elif grid_type == 'mac':
+
+                        u_center = 0.5 * (
+                            u[1:, :] + u[:-1, :]
+                        )
+
+                        v_center = 0.5 * (
+                            v[:, 1:] + v[:, :-1]
+                        )
+
+                        u_display = u_center
+                        v_display = v_center
+
+                        vel_mag_display = jnp.sqrt(
+                            u_center * u_center
+                            + v_center * v_center
+                        )
+
+                        if vort.shape == (
+                            self.solver.grid.nx + 1,
+                            self.solver.grid.ny
+                        ):
+                            vort_display = 0.5 * (
+                                vort[1:, :] + vort[:-1, :]
+                            )
+
+                        elif vort.shape == (
+                            self.solver.grid.nx,
+                            self.solver.grid.ny + 1
+                        ):
+                            vort_display = 0.5 * (
+                                vort[:, 1:] + vort[:, :-1]
+                            )
+
+                        else:
+                            vort_display = vort
+
+                    else:
+                        u_display = u
+                        v_display = v
+                        vort_display = vort
+                        vel_mag_display = jnp.sqrt(
+                            u * u + v * v
+                        )
+
+                    t_interp_end = time.time()
+
+                    # ----------------------------------------------
+                    # GPU -> CPU transfer only for displayed frames.
+                    # ----------------------------------------------
+                    t_queue_start = time.time()
+
+                    scalar_field = getattr(self.solver, 'c', None)
+                    if hasattr(self.solver, 'lbm_params') and getattr(self.solver.lbm_params, 'enable_thermal', False):
+                        scalar_field = getattr(self.solver, 'T', None)
+                    fields = jax.device_get({
+                        'u': u_display, 'v': v_display, 'vort': vort_display,
+                        'vel_mag': vel_mag_display, 'div': div, 'scalar': scalar_field,
+                        'pressure': self.solver.current_pressure if compute_pressure else None,
+                    })
+                    data = {key: np.asarray(value, dtype=np.float32) if value is not None else None
+                            for key, value in fields.items()}
+                    data.update({
+                        'time': getattr(self.solver, 'simulated_time', self.solver.iteration * self.solver.dt),
+                        'dt': self.solver.dt, 'source': self, 'rtf': 0.0,
+                        'iteration': self.solver.iteration, 'rms_divergence': div_rms,
+                    })
+
+                    # RTF includes simulation, field preparation and transfers; excludes pause.
+                    wall = self.active_wall_time + time.perf_counter() - cycle_start - (t_solver_end - t_solver_start)
+                    data['rtf'] = (data['time'] - self.initial_sim_time) / max(wall, 1e-12)
+                    t_queue_end = time.time()
+
+                    t_signal_start = time.time()
+
+                    if self.running:
+                        try:
+                            self.pending_frame = True
+                            self.data_ready.emit(data)
+                        except Exception as emit_error:
+                            logger.error(
+                                "Signal emission failed: "
+                                f"{emit_error}"
+                            )
+                            import traceback
+                            traceback.print_exc()
+
+                    t_signal_end = time.time()
+
+                    last_viewport_emit_time = now_viewport
+
+                else:
+                    # Profiling variables still need valid values.
+                    t_interp_start = t_solver_end
+                    t_interp_end = t_solver_end
+                    t_queue_start = t_solver_end
+                    t_queue_end = t_solver_end
+                    t_signal_start = t_solver_end
+                    t_signal_end = t_solver_end
+
                 # Dynamic airfoil motion logic
-                if self.control_panel and hasattr(self.control_panel, 'dynamic_airfoil_checkbox'):
+                if self.control_panel:
                     # Check if dynamic mode is enabled and obstacle is NACA
-                    is_dynamic = self.control_panel.dynamic_airfoil_checkbox.value() == 1
+
                     is_naca = getattr(self.solver.sim_params, 'obstacle_type', '') == 'naca_airfoil'
 
                     if is_dynamic and is_naca:
                         # Get parameters from UI
-                        min_aoa = self.control_panel.min_aoa_spinbox.value()
-                        max_aoa = self.control_panel.max_aoa_spinbox.value()
-                        aoa_increment = self.control_panel.aoa_increment_spinbox.value()
-                        steps_per_increment = self.control_panel.steps_per_increment_slider.value()
+                        min_aoa, max_aoa, aoa_increment, steps_per_increment = motion
 
                         # Initialize on first iteration
                         if not dynamic_aoa_enabled:
@@ -525,7 +712,7 @@ class SimulationWorker(QObject):
                                 self.solver.update_naca_angle(dynamic_aoa_current, recompute=True)
 
                         # Increment step counter
-                        dynamic_aoa_step_counter += 1
+                        dynamic_aoa_step_counter += cfd_substeps
 
                         # Check if we should update AoA
                         if dynamic_aoa_step_counter >= steps_per_increment:
@@ -547,23 +734,13 @@ class SimulationWorker(QObject):
                                 self.solver.update_naca_angle(dynamic_aoa_current, recompute=True)
 
                                 # Clear JIT cache and recompile to pick up new mask
-                                import jax
-                                jax.clear_caches()
                                 if hasattr(self.solver, '_jit_cache'):
                                     self.solver._jit_cache.clear()
                                 if hasattr(self.solver, '_step_jit'):
                                     delattr(self.solver, '_step_jit')
                                 self.solver._step_jit = self.solver.get_step_jit()
 
-                                # Update UI spinbox to reflect current AoA
-                                if hasattr(self.control_panel, 'angle_spinbox'):
-                                    self.control_panel.angle_spinbox.blockSignals(True)
-                                    self.control_panel.angle_spinbox.setValue(dynamic_aoa_current)
-                                    self.control_panel.angle_spinbox.blockSignals(False)
-                                if hasattr(self.control_panel, 'angle_slider'):
-                                    self.control_panel.angle_slider.blockSignals(True)
-                                    self.control_panel.angle_slider.setValue(int(dynamic_aoa_current * 10))
-                                    self.control_panel.angle_slider.blockSignals(False)
+                                self.angle_changed.emit(dynamic_aoa_current)
                     else:
                         # Dynamic mode disabled, reset state
                         dynamic_aoa_enabled = False
@@ -573,16 +750,18 @@ class SimulationWorker(QObject):
                     if hasattr(self.solver, 'update_spin'):
                         self.solver.update_spin()
 
+                self.active_wall_time += max(0.0, time.perf_counter() - cycle_start - (t_solver_end - t_solver_start))
                 # Simulation FPS counter
-                self.sim_fps_counter += 1
+                self.sim_fps_counter += cfd_substeps
                 if time.time() - self.last_sim_fps_time > 1.0:
                     try:
-                        self.fps_update.emit(self.sim_fps_counter)
+                        step_rate = self.sim_fps_counter / max(time.time() - self.last_sim_fps_time, 1e-9)
+                        self.fps_update.emit(round(step_rate))
                         # Emit profiling data (every second)
                         solver_ms = (t_solver_end - t_solver_start) * 1000
                         interp_ms = (t_interp_end - t_interp_start) * 1000
                         total_ms = (t_signal_end - t_solver_start) * 1000
-                        self.profiling_update.emit(solver_ms, interp_ms, total_ms, self.sim_fps_counter)
+                        self.profiling_update.emit(solver_ms, interp_ms, total_ms, step_rate)
                     except Exception as fps_error:
                         logger.error(f"FPS update failed: {fps_error}")
                     self.sim_fps_counter = 0
@@ -591,16 +770,20 @@ class SimulationWorker(QObject):
             except Exception as e:
                 if not self.running:  # Error during shutdown is OK
                     break
+                self.failed.emit(self, str(e))
                 logger.critical(f"Simulation loop crashed: {e}")
                 import traceback
                 traceback.print_exc()
                 break  # Exit the loop on fatal error
         
+        self.running = False
         logger.info("Simulation thread stopped")
     
     def pause(self):
         """Pause the simulation"""
         self.paused = True
+        with self.step_lock:
+            pass  # Return only once the in-flight numerical batch has completed.
 
     def resume(self):
         """Resume the simulation"""
@@ -608,21 +791,12 @@ class SimulationWorker(QObject):
 
     def recreate_shared_buffers(self, new_nx, new_ny):
         """Recreate shared memory buffers for new grid dimensions"""
-        # Clean up old buffers
-        if hasattr(self, 'shared_buffers'):
-            for buffer in self.shared_buffers.values():
-                buffer.cleanup()
-        
-        # Create new buffers with updated dimensions
-        self.shared_buffers = {
-            'u': SharedData((new_nx, new_ny), np.float32),
-            'v': SharedData((new_nx, new_ny), np.float32),
-            'vort': SharedData((new_nx, new_ny), np.float32),
-            'vel_mag': SharedData((new_nx, new_ny), np.float32)
-        }
+        # Frames own their NumPy arrays; no shared-memory allocation is needed.
+        self.shared_buffers = {}
 
     def stop_simulation(self):
         """Stop the simulation thread with robust cleanup"""
+        self.settings_timer.stop()
         self.running = False
         self.paused = False  # Ensure paused state is cleared
         
@@ -631,7 +805,7 @@ class SimulationWorker(QObject):
             self.thread.join(timeout=5.0)  # Wait up to 5 seconds
             if self.thread.is_alive():
                 logger.warning("Simulation thread did not stop gracefully after 5 seconds")
-                # Thread is still alive - this shouldn't happen but we'll continue anyway
+                raise RuntimeError("Simulation worker still stopping; refusing concurrent reset/restart")
 
         # Clean up shared memory
         if hasattr(self, 'shared_buffers'):
@@ -666,6 +840,8 @@ class SimulationController:
         self.latest_metrics = None
         self.callbacks = None  # Store callbacks for reconnecting signals
         self.running = False  # Running state for compatibility checks
+        self.backend = "cfd"
+        self.physicsnemo_case = {"geometry_id": "cylinder-1", "U_inf": 0.75, "Re": 200.0}
 
         # Frame skipping controls (kept for compatibility with existing code)
         self.simulation_step_counter = 0
@@ -699,8 +875,6 @@ class SimulationController:
         # Force garbage collection
         import gc
         gc.collect()
-        import jax
-        jax.clear_caches()
 
     def start_simulation(self, callbacks):
         """Start simulation in separate thread"""
@@ -708,42 +882,18 @@ class SimulationController:
         self.callbacks = callbacks
         
         try:
-            # COMPLETELY stop any existing simulation
-            if self.simulation_worker is not None:
-                old_worker = self.simulation_worker
-                old_worker.stop_simulation()
-
-                # Disconnect signals to prevent callbacks to deleted objects
-                try:
-                    old_worker.data_ready.disconnect()
-                    old_worker.fps_update.disconnect()
-                except Exception:
-                    pass  # Signals might not be connected
-
-                # Wait for thread to finish with proper synchronization
-                import time
-                if old_worker.thread and old_worker.thread.is_alive():
-                    for _ in range(50):  # 5 seconds max
-                        if not old_worker.thread.is_alive():
-                            break
-                        time.sleep(0.1)
-                    if old_worker.thread.is_alive():
-                        logger.warning("Old simulation thread did not stop in 5 seconds")
-
-                # Clear reference
-                self.simulation_worker = None
-            
-            # Clear stale data before restart
+            self.stop_simulation()
+            self.simulation_worker = None
             self.latest_data = None
-
-            # Start metrics worker if not already running
-            if self.metrics_worker is None:
+            self.latest_metrics = None
+            if self.backend == "physicsnemo":
+                from viewer.physicsnemo_backend import PhysicsNeMoWorker
+                self.metrics_worker = None
+                self.simulation_worker = PhysicsNeMoWorker(self.solver, self.physicsnemo_case.copy())
+            else:
                 self.metrics_worker = MetricsWorker(self.solver)
                 self.metrics_worker.start()
-                logger.info("Metrics worker started")
-
-            # Create fresh simulation worker
-            self.simulation_worker = SimulationWorker(self.solver, self.control_panel, self.info_panel, self.metrics_worker, self.flow_viz)
+                self.simulation_worker = SimulationWorker(self.solver, self.control_panel, self.info_panel, self.metrics_worker, self.flow_viz)
 
             # Connect signals
             if 'data_ready' in callbacks:
@@ -763,8 +913,11 @@ class SimulationController:
                     callbacks['metrics_ready'], Qt.ConnectionType.QueuedConnection
                 )
 
+            if 'failed' in callbacks:
+                self.simulation_worker.failed.connect(callbacks['failed'], Qt.ConnectionType.QueuedConnection)
             # Start the thread
             self.simulation_worker.start()
+            self.running = True
 
             logger.info("Simulation started in separate thread")
 
@@ -772,69 +925,91 @@ class SimulationController:
             logger.error(f"Error starting simulation: {e}")
             import traceback
             traceback.print_exc()
-            self.simulation_worker = None
+            raise
+
+    def configure_backend(self, backend, case=None):
+        """Select the worker implementation without changing the CFD solver."""
+        if backend not in ("cfd", "physicsnemo"):
+            raise ValueError(f"Unknown solver backend: {backend}")
+        if self.running or (self.simulation_worker and self.simulation_worker.running):
+            self.stop_simulation()
+        self.backend = backend
+        if case is not None:
+            self.physicsnemo_case = dict(case)
     
     def full_reset(self):
         """Completely reset the simulation controller for parameter changes."""
 
-        # Stop and cleanup existing worker
-        if self.simulation_worker is not None:
-            self.simulation_worker.stop_simulation()
-            self.simulation_worker = None
-
-        # Clear latest data
+        self.stop_simulation()
+        self.simulation_worker = None
         self.latest_data = None
-
-        # Reset counters
+        self.latest_metrics = None
         self.simulation_step_counter = 0
         self.should_update_visualization = False
 
-        # Force garbage collection
-        import gc
-        gc.collect()
-
-        # Clear JAX caches
-        import jax
-        jax.clear_caches()
-
     def start_metrics(self):
-        """Start metrics worker"""
+        """Ensure exactly one MetricsWorker is running."""
+
+        created = False
+
         if self.metrics_worker is None:
             self.metrics_worker = MetricsWorker(self.solver)
-            self.metrics_worker.start()
-            
-            # Reconnect metrics_ready signal if callbacks are available
-            if self.callbacks and 'metrics_ready' in self.callbacks:
-                self.metrics_worker.metrics_ready.connect(
-                    self.callbacks['metrics_ready'], Qt.ConnectionType.QueuedConnection
-                )
-                logger.info("Metrics worker started and signal reconnected")
-            else:
-                logger.info("Metrics worker started (no callbacks to reconnect)")
-            
-            # Update simulation worker's reference to the new metrics worker
-            if self.simulation_worker:
-                self.simulation_worker.metrics_worker = self.metrics_worker
-                logger.info("Simulation worker's metrics_worker reference updated")
+            created = True
         else:
-            logger.info("Metrics worker already running")
+            self.metrics_worker.solver = self.solver
+
+        worker_alive = (
+            self.metrics_worker.running
+            and self.metrics_worker.thread is not None
+            and self.metrics_worker.thread.is_alive()
+        )
+
+        if not worker_alive:
+            self.metrics_worker.start()
+
+        if (
+            created
+            and self.callbacks
+            and "metrics_ready" in self.callbacks
+        ):
+            self.metrics_worker.metrics_ready.connect(
+                self.callbacks["metrics_ready"],
+                Qt.ConnectionType.QueuedConnection
+            )
+
+        if self.simulation_worker:
+            self.simulation_worker.metrics_worker = (
+                self.metrics_worker
+            )
 
     def stop_metrics(self):
-        """Stop metrics worker"""
-        if self.metrics_worker:
-            self.metrics_worker.stop()
-            self.metrics_worker = None
-            logger.info("Metrics worker stopped")
+        """Stop and release MetricsWorker."""
+
+        if self.metrics_worker is None:
+            return
+
+        worker = self.metrics_worker
+        worker.stop()
+        self.metrics_worker = None
+
+        if self.simulation_worker:
+            self.simulation_worker.metrics_worker = None
 
     def stop_simulation(self):
-        """Stop the simulation and metrics worker"""
+        """Stop simulation and metrics workers safely."""
+
         self.running = False
+
         if self.simulation_worker:
             self.simulation_worker.stop_simulation()
-        if self.metrics_worker:
-            self.metrics_worker.stop()
+
+        self.stop_metrics()
+        self.latest_data = None
+        self.latest_metrics = None
+        self.should_update_visualization = False
+
         logger.info("Simulation stopped")
-    
+
     def pause_simulation(self):
         """Pause simulation without stopping the thread"""
         if self.simulation_worker:

@@ -1,0 +1,13 @@
+{
+  "seed": 20260913,
+  "dataset_root": "/mnt/c/users/gusta/documents/codex/2026-09-09/files-pasted-by-the-user-s/outputs/teacher-pilot",
+  "output_root": "/home/gus/AeroJAX/physicsnemo_fno/runs/pilot_fno",
+  "model": {"layers": 4, "width": 32, "modes": [16, 12], "padding": 8},
+  "training": {"batch_size": 16, "epochs": 12, "learning_rate": 0.001, "weight_decay": 0.0001, "patience": 4, "num_workers": 0},
+  "smoke": {"pairs": 16, "steps": 2},
+  "overfit": {"pairs": 8, "steps": 80, "target_loss": 0.0005},
+  "rollout_horizons": [10, 50, 100],
+  "inference": {"warmup": 30, "iterations": 200},
+  "teacher_measured_step_fps": 44.0,
+  "teacher_export_stride": 2
+}

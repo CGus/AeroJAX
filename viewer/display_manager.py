@@ -351,7 +351,7 @@ class DisplayManager:
         
         try:
             data = self.sim_controller.get_latest_data()
-            if data is None:
+            if data is None or not self.sim_controller.should_update():
                 # Don't try to access removed info_label
                 return
             
@@ -375,7 +375,7 @@ class DisplayManager:
             # Update plots with error handling
             try:
                 # Get pressure data from solver
-                pressure_data = self.solver.current_pressure if hasattr(self.solver, 'current_pressure') else None
+                pressure_data = data.get('pressure')
 
                 t_update_viz = time.time()
                 self.flow_viz.update_visualization(
@@ -566,14 +566,14 @@ class DisplayManager:
                 print(f"Warning: Visualization update failed: {viz_error}")
                 # Continue running even if visualization fails
                 
-            # Update obstacle outlines periodically
+            # VWT optimization:
+            # Static obstacle outlines are refreshed only when geometry changes.
             t_outline_start = time.time()
             try:
-                if hasattr(self, 'obstacle_renderer') and self.obstacle_renderer:
+                if False and hasattr(self, 'obstacle_renderer') and self.obstacle_renderer:
                     self.obstacle_renderer.update_obstacle_outlines(self.solver)
             except Exception as outline_error:
                 print(f"Warning: Outline update failed: {outline_error}")
-                # Continue running even if outline update fails
             t_outline_end = time.time()
                 
             # Update LDC validation overlay if enabled
@@ -668,7 +668,10 @@ class DisplayManager:
         # Update overlays with error handling
         t_overlay_start = time.time()
         try:
-            if self.obstacle_renderer is not None:
+            # VWT optimization:
+            # obstacle outline is recomputed explicitly when geometry changes,
+            # not on every visualization frame.
+            if False and self.obstacle_renderer is not None:
                 self.obstacle_renderer.update_obstacle_outlines(self.solver)
         except Exception as outline_error:
             print(f"Warning: Overlay outline update failed: {outline_error}")
@@ -676,13 +679,17 @@ class DisplayManager:
             
         t_sdf_start = time.time()
         try:
-            self.sdf_viz.update_sdf_visualization(self.solver)
+            # Custom PNG masks do not have an SDF.
+            # Preserve SDF visualization for analytical obstacles.
+            obstacle_type = getattr(self.solver.sim_params, 'obstacle_type', None)
+            if obstacle_type != 'custom':
+                self.sdf_viz.update_sdf_visualization(self.solver)
         except Exception as sdf_error:
             print(f"Warning: SDF visualization update failed: {sdf_error}")
         t_sdf_end = time.time()
         
         t_total = time.time() - t_start
-        
+
         # Print profiling every 60 frames
         if not hasattr(self, '_viz_frame_count'):
             self._viz_frame_count = 0
@@ -691,8 +698,8 @@ class DisplayManager:
         # Update status information
         # Use control_panel labels if available
         if hasattr(self, 'control_panel') and self.control_panel is not None:
-            self.control_panel.sim_time_label.setText(f"Time: {data['time']:.3f}")
-            self.control_panel.dt_label.setText(f"dt: {self.solver.dt:.4f}")
+            self.control_panel.sim_time_label.setText(f"Time: {data['time']:.3f} s | RTF: {data.get('rtf', 0.0):.3f}")
+            self.control_panel.dt_label.setText(f"dt: {data.get('dt', self.solver.dt):.6g}")
             self.control_panel.max_div_label.setText(f"RMS Divergence: {data['rms_divergence']:.6f}")
 
             # Update dt_spinbox to show current adaptive dt when adaptive dt is enabled
@@ -904,6 +911,13 @@ class DisplayManager:
                 self.info_panel.obstacle_x_label.setText(f"X: {center_x:.3f}")
                 self.info_panel.obstacle_y_label.setText(f"Y: {center_y:.3f}")
                 self.info_panel.obstacle_diameter_label.setText(f"Diameter: {diameter:.3f}")
+            elif obstacle_type == 'custom':
+                self.info_panel.obstacle_type_label.setText("Obstacle: Custom PNG")
+                self.info_panel.obstacle_aoa_label.setText("AoA: N/A")
+                self.info_panel.obstacle_chord_label.setText("Chord: N/A")
+                self.info_panel.obstacle_x_label.setText("X: N/A")
+                self.info_panel.obstacle_y_label.setText("Y: N/A")
+                self.info_panel.obstacle_diameter_label.setText("Diameter: N/A")
             else:
                 self.info_panel.obstacle_type_label.setText(f"Obstacle: {obstacle_type}")
                 self.info_panel.obstacle_aoa_label.setText("AoA: N/A")
@@ -918,10 +932,10 @@ class DisplayManager:
         self.current_sim_fps = fps
         # Use control_panel label for sim FPS
         if hasattr(self, 'control_panel') and self.control_panel is not None:
-            self.control_panel.sim_fps_label.setText(f"Sim FPS: {fps}")
+            self.control_panel.sim_fps_label.setText(f"Step/s: {fps}")
         # Also update info_panel label for copy button
         if hasattr(self, 'info_panel') and self.info_panel is not None:
-            self.info_panel.sim_fps_label.setText(f"Sim FPS: {fps}")
+            self.info_panel.sim_fps_label.setText(f"Step/s: {fps}")
         # Update plot titles with FPS
         if hasattr(self, 'flow_viz') and self.flow_viz is not None:
             viz_fps = getattr(self, 'current_viz_fps', 0.0)
@@ -983,12 +997,18 @@ class DisplayManager:
         error_metrics = metrics_data.get('error_metrics')
         airfoil_metrics = metrics_data.get('airfoil_metrics')
 
+        if metrics_data.get('source') is not None:
+            source = metrics_data['source']
+            if source is not self.sim_controller.metrics_worker or not source.running or source.paused:
+                return
         # Initialize CSV logging on first call
         if not hasattr(self, 'csv_file_path'):
             self._init_csv_logging()
 
         # Update solver history with async metrics
         if error_metrics:
+            self.solver.history['time'].append(metrics_data.get('time', 0.0))
+            self.solver.history['dt'].append(metrics_data.get('dt', self.solver.dt))
             self.solver.history['l2_change'].append(error_metrics['l2_change'])
             self.solver.history['rms_change'].append(error_metrics['rms_change'])
             self.solver.history['l2_change_u'].append(error_metrics['l2_change_u'])
@@ -1008,6 +1028,7 @@ class DisplayManager:
                 self._log_metrics_to_csv(error_metrics, airfoil_metrics, current_time, iteration, sim_fps)
 
         if airfoil_metrics:
+            self.solver.history['airfoil_metrics'].setdefault('time', []).append(metrics_data.get('time', 0.0))
             self.solver.history['airfoil_metrics']['CL'].append(airfoil_metrics['CL'])
             self.solver.history['airfoil_metrics']['CD'].append(airfoil_metrics['CD'])
             self.solver.history['airfoil_metrics']['stagnation_x'].append(airfoil_metrics['stagnation_x'])
@@ -1028,7 +1049,7 @@ class DisplayManager:
                 iteration = airfoil_metrics.get('iteration', 0)
                 # Convert iteration to approximate time using dt
                 dt = getattr(self.solver.sim_params, 'fixed_dt', 0.005)
-                current_time = iteration * dt if iteration > 0 else 0.0
+                current_time = metrics_data.get('time', 0.0)
                 self.flow_viz.update_coefficients(
                     cl_value=airfoil_metrics['CL'],
                     cd_value=airfoil_metrics['CD'],
@@ -1086,6 +1107,25 @@ class DisplayManager:
     
     def handle_simulation_data(self, data: Dict[str, Any]) -> None:
         """Process new data from the simulation engine."""
+        source = data.get('source')
+        if source is not None:
+            source.pending_frame = False
+            if source is not self.sim_controller.simulation_worker or not source.running or source.paused:
+                return
+        if getattr(self.sim_controller, "backend", "cfd") == "physicsnemo":
+            # Keep the viewer's common state coherent for overlays, status and Reset.
+            self.solver.u = data["u"]
+            self.solver.v = data["v"]
+            self.solver.current_pressure = data["pressure"]
+            self.solver.mask = data["mask"]
+            self.solver.iteration = data["iteration"]
+            self.solver.simulated_time = data["time"]
+            self.solver.dt = data["dt"]
+            if data.get("iteration") == 0 and hasattr(self, "control_panel"):
+                geometry = data.get("case", {}).get("geometry", {}).get("id", "pilot")
+                self.control_panel.backend_status_label.setText(
+                    f"Active: PhysicsNeMo FNO · {geometry} · {data.get('gpu', 'CUDA')}"
+                )
         # Debug LDC flow progress with explosion detection
         if hasattr(self.solver, 'sim_params') and self.solver.sim_params.flow_type == 'lid_driven_cavity':
             iteration = data.get('iteration', 0)

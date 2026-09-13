@@ -1,3 +1,4 @@
+from PyQt6.QtWidgets import QSizePolicy
 """
 Main control panel orchestrating all UI components.
 """
@@ -6,6 +7,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
     QLabel, QPushButton, QSpinBox, QComboBox, QDoubleSpinBox,
     QCheckBox, QSlider, QRadioButton, QButtonGroup
+,
+    QSizePolicy
 )
 from PyQt6.QtCore import Qt
 from .top_console import TopConsole
@@ -29,22 +32,75 @@ class ControlPanel(QWidget):
         """Setup the complete control panel UI: top console + scrollable sidebar"""
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(5, 5, 5, 5)
-        main_layout.setSpacing(10)
+        main_layout.setSpacing(3)
 
         # ========== TOP CONSOLE (horizontal bar with buttons only) ==========
         self.top_console = TopConsole(self)
         main_layout.addWidget(self.top_console)
 
+        # Backend selection. CFD remains the default/reference implementation.
+        backend_row = QHBoxLayout()
+        backend_row.addWidget(QLabel("Solver backend:"))
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItem("AeroJAX CFD", "cfd")
+        self.backend_combo.addItem("PhysicsNeMo FNO", "physicsnemo")
+        backend_row.addWidget(self.backend_combo)
+        self.backend_status_label = QLabel("Active: AeroJAX CFD")
+        backend_row.addWidget(self.backend_status_label)
+        backend_row.addStretch()
+        main_layout.addLayout(backend_row)
+
+        self.physicsnemo_case_widget = QWidget()
+        fno_row = QHBoxLayout(self.physicsnemo_case_widget)
+        fno_row.setContentsMargins(0, 0, 0, 0)
+        fno_row.addWidget(QLabel("Pilot case:"))
+        self.physicsnemo_geometry_combo = QComboBox()
+        for label, case_id in (
+            ("NACA 0012 / 0°", "naca-0"), ("NACA 2412 / 3°", "naca-1"),
+            ("NACA 4415 / 6°", "naca-2"), ("Cylinder r=0.4", "cylinder-0"),
+            ("Cylinder r=0.6", "cylinder-1"), ("Cylinder r=0.8", "cylinder-2"),
+            ("Ellipse 0.70×0.30 [validation]", "ellipse-0"),
+            ("Ellipse 0.95×0.42 [validation]", "ellipse-1"),
+            ("Ellipse 1.20×0.54 [validation]", "ellipse-2"),
+            ("Rectangle 0.45×0.45 [test]", "rectangle-0"),
+            ("Rectangle 0.65×0.60 [test]", "rectangle-1"),
+            ("Rectangle 0.85×0.75 [test]", "rectangle-2"),
+        ):
+            self.physicsnemo_geometry_combo.addItem(label, case_id)
+        self.physicsnemo_geometry_combo.setCurrentIndex(4)
+        fno_row.addWidget(self.physicsnemo_geometry_combo)
+        self.physicsnemo_condition_combo = QComboBox()
+        self.physicsnemo_condition_combo.addItem("U=0.75, Re=200", (0.75, 200.0))
+        self.physicsnemo_condition_combo.addItem("U=1.25, Re=600", (1.25, 600.0))
+        fno_row.addWidget(self.physicsnemo_condition_combo)
+        self.physicsnemo_case_widget.setToolTip(
+            "Surrogate v1: exact pilot distribution, grid 128×64, domain 20×7.5, Δt=0.002. Custom masks unsupported."
+        )
+        self.physicsnemo_case_widget.setVisible(False)
+        main_layout.addWidget(self.physicsnemo_case_widget)
+
         # ========== SCROLLABLE SIDEBAR (all groupboxes at same level) ==========
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setMinimumWidth(0)
+        scroll_area.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
 
         # Sidebar content widget
         sidebar_content = QWidget()
+        # La larghezza minima viene determinata dal contenuto.
+        # Evita sovrapposizioni, ma permette allo splitter di allargare la colonna.
+        sidebar_content.setMinimumWidth(max(0, sidebar_content.sizeHint().width()))
+        sidebar_content.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred
+        )
         sidebar_layout = QVBoxLayout(sidebar_content)
-        sidebar_layout.setSpacing(15)
+        sidebar_layout.setSpacing(3)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
 
         # ========== GRID SIZE GROUP ==========
@@ -561,7 +617,7 @@ class ControlPanel(QWidget):
         self.re_group = CollapsibleGroupBox("Reynolds Number", start_collapsed=True)
         from PyQt6.QtWidgets import QGridLayout
         re_layout = QGridLayout()
-        re_layout.setSpacing(5)
+        re_layout.setSpacing(3)
         re_layout.setColumnStretch(3, 1)  # Stretch last column
 
         # Row 0: U input
@@ -572,9 +628,6 @@ class ControlPanel(QWidget):
         self.u_input.setValue(0.5)
         self.u_input.setMaximumWidth(110)
         re_layout.addWidget(self.u_input, 0, 1)
-        self.lock_u_cb = QCheckBox("Lock")
-        self.lock_u_cb.setChecked(False)
-        re_layout.addWidget(self.lock_u_cb, 0, 2)
 
         # Row 1: ν input
         re_layout.addWidget(QLabel("ν (m²/s):"), 1, 0)
@@ -585,21 +638,29 @@ class ControlPanel(QWidget):
         self.nu_input.setValue(0.001667)
         self.nu_input.setMaximumWidth(110)
         re_layout.addWidget(self.nu_input, 1, 1)
-        self.lock_nu_cb = QCheckBox("Lock")
-        self.lock_nu_cb.setChecked(True)
-        re_layout.addWidget(self.lock_nu_cb, 1, 2)
 
         # Row 2: Re input
         re_layout.addWidget(QLabel("Re:"), 2, 0)
         self.re_input = QDoubleSpinBox()
-        self.re_input.setRange(1.0, 100000.0)
+        self.re_input.setRange(1.0, 1000000.0)
         self.re_input.setSingleStep(1.0)
         self.re_input.setValue(2000.0)
         self.re_input.setMaximumWidth(110)
         re_layout.addWidget(self.re_input, 2, 1)
-        self.lock_re_cb = QCheckBox("Lock")
-        self.lock_re_cb.setChecked(True)
-        re_layout.addWidget(self.lock_re_cb, 2, 2)
+
+        # Auto-derived parameter selector
+        re_layout.addWidget(QLabel("Auto:"), 0, 2)
+        self.re_auto_combo = QComboBox()
+        self.re_auto_combo.addItems(["Re", "ν", "U"])
+        self.re_auto_combo.setCurrentText("Re")
+        self.re_auto_combo.setMaximumWidth(80)
+        re_layout.addWidget(self.re_auto_combo, 0, 3)
+        def sync_auto_mode(mode):
+            self.u_input.setReadOnly(mode == 'U')
+            self.nu_input.setReadOnly(mode == 'ν')
+            self.re_input.setReadOnly(mode == 'Re')
+        self.re_auto_combo.currentTextChanged.connect(sync_auto_mode)
+        sync_auto_mode(self.re_auto_combo.currentText())
 
         # Row 3: Apply button
         self.apply_re_btn = QPushButton("Apply")
@@ -653,7 +714,7 @@ class ControlPanel(QWidget):
         # Add KH parameters directly to flow type group
         self.kh_widget = QWidget()
         kh_layout = QGridLayout(self.kh_widget)
-        kh_layout.setSpacing(5)
+        kh_layout.setSpacing(3)
         kh_layout.setColumnStretch(3, 1)  # Stretch last column
 
         # Row 0: Shear Velocity (U0)
@@ -732,7 +793,7 @@ class ControlPanel(QWidget):
         # ========== SOLVER PARAMETERS GROUP ==========
         solver_group = CollapsibleGroupBox("Solver Parameters", start_collapsed=True)
         solver_layout = QGridLayout()
-        solver_layout.setSpacing(5)
+        solver_layout.setSpacing(3)
         solver_layout.setColumnStretch(4, 1)  # Stretch last column
 
         # Row 0: MG V-cycles
@@ -911,6 +972,13 @@ class ControlPanel(QWidget):
         main_layout.addWidget(scroll_area, 1)
 
         self.setLayout(main_layout)
+        # La ControlPanel segue il contenuto senza una larghezza fissa.
+        self.setMinimumWidth(self.sizeHint().width())
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
+
 
     def _update_epsilon_label(self):
         """Update epsilon label when slider changes."""
@@ -1767,8 +1835,7 @@ class ControlPanel(QWidget):
         
         # Update Reynolds number input
         self.re_input.setValue(float(re_value))
-        self.lock_re_cb.setChecked(True)
-        self.lock_nu_cb.setChecked(False)  # Allow viscosity to be computed
+        self.re_auto_combo.setCurrentText("ν")
         
         # Delegate to parent viewer to apply the Re change
         if hasattr(self, 'parent_viewer') and self.parent_viewer is not None:

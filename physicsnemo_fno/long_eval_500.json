@@ -1,0 +1,14 @@
+{
+  "schema": "aerojax.teacher.v1",
+  "seed": 20260913,
+  "grid": [128, 64, 20.0, 7.5],
+  "frames": 520,
+  "stride": 2,
+  "warmup": 20,
+  "dt": 0.001,
+  "geometries": [
+    {"id": "ellipse-long-500", "family": "ellipse", "split": "validation", "a": 0.95, "b": 0.42},
+    {"id": "rectangle-long-500", "family": "rectangle", "split": "test", "a": 0.65, "b": 0.60}
+  ],
+  "conditions": [{"U_inf": 1.25, "Re": 600.0}]
+}
