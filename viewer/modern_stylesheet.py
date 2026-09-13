@@ -486,6 +486,67 @@ QFrame[class="separator"] {
     max-height: 1px;
     min-height: 1px;
 }
+
+
+/* AeroJAX dark-mode completion */
+QMainWindow,
+QWidget {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+}
+
+QScrollArea,
+QScrollArea > QWidget,
+QScrollArea > QWidget > QWidget {
+    background-color: #1e1e2e;
+    border: none;
+}
+
+QGroupBox {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+}
+
+QFrame {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+}
+
+QLabel {
+    color: #cdd6f4;
+    background-color: transparent;
+}
+
+QSpinBox,
+QDoubleSpinBox,
+QComboBox,
+QLineEdit {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #585b70;
+}
+
+QPushButton {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #585b70;
+}
+
+QPushButton:hover {
+    background-color: #45475a;
+}
+
+QCheckBox,
+QRadioButton {
+    color: #cdd6f4;
+    background-color: transparent;
+}
+
+QToolTip {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #585b70;
+}
 """
 
 

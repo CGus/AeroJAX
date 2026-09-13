@@ -1,3 +1,4 @@
+from solver.config import invalidate_solver_cache
 """
 Flow control methods for BaselineSolver.
 Handles flow type changes, obstacle type changes, and timestep control.
@@ -61,7 +62,7 @@ def apply_flow_type(self, flow_type: str):
         delattr(self, 'mask')
     
     self._jit_cache = {}
-    jax.clear_caches()
+    invalidate_solver_cache(self)
     import gc
     gc.collect()
     
@@ -100,15 +101,30 @@ def apply_flow_type(self, flow_type: str):
         'airfoil_metrics': {'CL': [], 'CD': [], 'stagnation_x': [], 'separation_x': [], 'Cp_min': [], 'wake_deficit': [], 'strouhal': [], 'time': []}
     }
     self.iteration = 0
+    self.simulated_time = 0.0
     
     print(f"Flow type changed to {flow_type}")
     print(f"Grid updated to {self.grid.nx}x{self.grid.ny} ({self.grid.lx}x{self.grid.ly})")
 
 
 def set_obstacle_type(self, obstacle_type: str, **kwargs):
-    """Set obstacle type (cylinder, NACA airfoil, cow, or three_cylinder_array)"""
-    if obstacle_type not in ['cylinder', 'naca_airfoil', 'cow', 'three_cylinder_array']:
-        raise ValueError("obstacle_type must be 'cylinder', 'naca_airfoil', 'cow', or 'three_cylinder_array'")
+    """Set obstacle type and rebuild the CFD mask."""
+    supported_obstacles = [
+        'cylinder',
+        'naca_airfoil',
+        'cow',
+        'three_cylinder_array',
+        'solid_wall',
+        'urban_map',
+        'tesla_valve',
+        'custom',
+    ]
+
+    if obstacle_type not in supported_obstacles:
+        raise ValueError(
+            f"Unsupported obstacle_type={obstacle_type!r}. "
+            f"Supported types: {', '.join(supported_obstacles)}"
+        )
     
     self.sim_params.obstacle_type = obstacle_type
     
@@ -125,7 +141,7 @@ def set_obstacle_type(self, obstacle_type: str, **kwargs):
     
     # Clear JAX cache to force re-tracing with new obstacle type
     import jax
-    jax.clear_caches()
+    invalidate_solver_cache(self)
     
     # Clear JIT cache to force recompilation of step function
     self._jit_cache = {}
@@ -176,7 +192,7 @@ def update_naca_angle(self, angle_of_attack: float, recompute: bool = True, clea
     if recompute:
         if clear_cache:
             import jax
-            jax.clear_caches()
+            invalidate_solver_cache(self)
         
         self.mask = self._compute_mask()
         # Apply mask to velocity fields
@@ -247,18 +263,6 @@ def set_adaptive_dt(self):
             print(f"CFL-based adaptive timestep enabled with cfl_target={self.sim_params.max_cfl}, dt_min={self.sim_params.dt_min}, dt_max={self.sim_params.dt_max}")
         except ImportError:
             print("Warning: CFLAdaptiveController not available, adaptive dt may not work properly")
-    jax.clear_caches()
-    if hasattr(self, '_step_jit'):
-        delattr(self, '_step_jit')
-    self._step_jit = self.get_step_jit()  # Recreate JIT function
-    # Reinitialize velocity fields with proper initial conditions
-    # Call the appropriate flow initialization function to avoid starting from zero
-    if self.sim_params.flow_type == 'von_karman':
-        self._initialize_von_karman_flow()
-    elif self.sim_params.flow_type == 'lid_driven_cavity':
-        self._initialize_cavity_flow()
-    elif self.sim_params.flow_type == 'taylor_green':
-        self._initialize_taylor_green_flow()
 
 
 def set_fixed_dt(self, dt: float):
@@ -267,7 +271,6 @@ def set_fixed_dt(self, dt: float):
     self.dt = dt
     self.sim_params.fixed_dt = dt
     print(f"Fixed timestep set to {dt}")
-    jax.clear_caches()
     if hasattr(self, '_step_jit'):
         delattr(self, '_step_jit')
     self._step_jit = self.get_step_jit()  # Recreate JIT function

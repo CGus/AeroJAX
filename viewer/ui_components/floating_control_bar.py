@@ -22,7 +22,7 @@ class FloatingControlBar(QFrame):
         self.setFrameShadow(QFrame.Shadow.Raised)
         self.setStyleSheet("""
             QFrame {
-                background-color: #f0f0f0;
+                background-color: transparent;
                 border: 1px solid #ccc;
                 border-radius: 3px;
             }

@@ -1,3 +1,4 @@
+from solver.config import invalidate_solver_cache
 """
 Parameter update handlers for the CFD viewer.
 Handles updates to simulation parameters like Reynolds number, grid resolution,
@@ -29,9 +30,13 @@ class ParameterHandlers:
         new_U = self.control_panel.u_input.value()
         new_nu = self.control_panel.nu_input.value()
         new_Re = self.control_panel.re_input.value()
-        lock_U = self.control_panel.lock_u_cb.isChecked()
-        lock_nu = self.control_panel.lock_nu_cb.isChecked()
-        lock_Re = self.control_panel.lock_re_cb.isChecked()
+        auto_mode = self.control_panel.re_auto_combo.currentText()
+
+        # Compatibility with existing solver constraints:
+        # the automatically derived parameter is the only unlocked one.
+        lock_U = auto_mode != "U"
+        lock_nu = auto_mode != "ν"
+        lock_Re = auto_mode != "Re"
         
         # Store current LES settings to preserve them
         current_use_les = self.solver.sim_params.use_les
@@ -46,42 +51,22 @@ class ParameterHandlers:
             # Apply stored new values from UI
             logger.info(f"UI values: U={new_U}, nu={new_nu}, Re={new_Re}")
 
-            # Compute characteristic length
-            if self.solver.sim_params.obstacle_type == 'naca_airfoil':
-                L = self.solver.sim_params.naca_chord
-            else:
-                L = 2.0 * self.solver.geom.radius
+            from solver.params import compute_characteristic_length
+            L = compute_characteristic_length(self.solver.sim_params.flow_type,
+                self.solver.geom, self.solver.sim_params, self.solver.sim_params.obstacle_type)
 
-            # Compute derived value based on which parameter is unlocked
-            # If exactly 2 are locked, derive the third
-            # If 1 is locked, derive the other 2 from the locked one and user input
-            locked_count = sum([lock_U, lock_nu, lock_Re])
-            if locked_count == 2:
-                if not lock_U:
-                    new_U = new_nu * new_Re / L
-                    self.control_panel.u_input.setValue(float(new_U))
-                elif not lock_nu:
-                    new_nu = new_U * L / new_Re
-                    self.control_panel.nu_input.setValue(float(new_nu))
-                elif not lock_Re:
-                    new_Re = new_U * L / new_nu
-                    self.control_panel.re_input.setValue(float(new_Re))
-            elif locked_count == 1:
-                if lock_U:
-                    # U is locked, derive ν and Re from U
-                    # Use user's Re input to compute ν
-                    new_nu = new_U * L / new_Re
-                    self.control_panel.nu_input.setValue(float(new_nu))
-                elif lock_nu:
-                    # ν is locked, derive U and Re from ν
-                    # Use user's Re input to compute U
-                    new_U = new_nu * new_Re / L
-                    self.control_panel.u_input.setValue(float(new_U))
-                elif lock_Re:
-                    # Re is locked, derive U and ν from Re
-                    # Use user's U input to compute ν
-                    new_nu = new_U * L / new_Re
-                    self.control_panel.nu_input.setValue(float(new_nu))
+            # Derive exactly one parameter from the other two.
+            if auto_mode == "Re":
+                new_Re = new_U * L / new_nu
+                self.control_panel.re_input.setValue(float(new_Re))
+
+            elif auto_mode == "ν":
+                new_nu = new_U * L / new_Re
+                self.control_panel.nu_input.setValue(float(new_nu))
+
+            elif auto_mode == "U":
+                new_U = new_nu * new_Re / L
+                self.control_panel.u_input.setValue(float(new_U))
 
             # Warn about high velocities that may cause instability
             if new_U > 5.0:
@@ -111,31 +96,83 @@ class ParameterHandlers:
                 self.solver.mask = self.solver._compute_mask()
                 logger.info(f"Recomputed mask with new ε = {self.solver.sim_params.eps:.4f}")
 
-            # Recalculate dt based on new velocity for stability
-            # Use Re-dependent parameters from params.py instead of hardcoded values
+            # ----------------------------------------------------------
+            # Virtual Wind Tunnel: conservative automatic timestep
+            # ----------------------------------------------------------
             from solver.params import get_re_parameters
+
             re_params = get_re_parameters(new_Re, self.solver.grid.nx)
-            cfl_target = re_params['cfl_target']
-            dt_max = re_params['dt_max']
 
-            dx = self.solver.grid.dx
-            dy = self.solver.grid.dy
-            dt_cfl = cfl_target * min(dx, dy) / (new_U + 1e-8)
-            dt_diffusion = 0.25 * min(dx**2, dy**2) / new_nu
+            # Virtual Wind Tunnel stability target.
+            #
+            # Local velocity around obstacles can substantially exceed U_inf,
+            # especially in narrow passages such as the Tesla valve.
+            # Use increasingly conservative CFL targets as inlet speed rises.
+            configured_cfl = float(re_params.get('cfl_target', 0.20))
 
-            self.solver.dt = min(dt_cfl, dt_diffusion, dt_max)
-            self.solver.dt = max(self.solver.dt, self.solver.sim_params.dt_min)
-            logger.info(f"Recalculated dt for U={new_U:.2f} m/s: dt={self.solver.dt:.6f} (CFL={cfl_target}, Re={new_Re:.0f})")
+            if abs(float(new_U)) > 8.0:
+                velocity_cfl = 0.035
+            elif abs(float(new_U)) > 5.0:
+                velocity_cfl = 0.05
+            elif abs(float(new_U)) > 3.0:
+                velocity_cfl = 0.08
+            elif abs(float(new_U)) > 1.5:
+                velocity_cfl = 0.12
+            else:
+                velocity_cfl = 0.20
 
-            # Update GUI to show the derived parameter (not the locked ones)
-            if not self.solver.flow.constraints.lock_U:
-                self.control_panel.u_input.setValue(self.solver.flow.U_inf)
-            if not self.solver.flow.constraints.lock_nu:
-                self.control_panel.nu_input.setValue(self.solver.flow.nu)
-            if not self.solver.flow.constraints.lock_Re:
-                self.control_panel.re_input.setValue(int(self.solver.flow.Re))
+            cfl_target = min(configured_cfl, velocity_cfl)
 
-            self.solver._step_jit = self.solver.get_step_jit()
+            dt_max = float(re_params.get('dt_max', 1.0))
+            self.solver.sim_params.dt_max = dt_max
+
+            dx = float(self.solver.grid.dx)
+            dy = float(self.solver.grid.dy)
+            h = min(dx, dy)
+
+            U_abs = max(abs(float(new_U)), 1e-8)
+            nu_abs = max(abs(float(new_nu)), 1e-12)
+
+            # Explicit advection stability
+            # U_inf is not necessarily the maximum local speed.
+            # Reserve headroom for obstacle-induced acceleration.
+            local_velocity_safety = 1.5
+            dt_cfl = (
+                cfl_target * h /
+                (U_abs * local_velocity_safety)
+            )
+
+            # Explicit viscous/diffusion stability, with safety factor
+            dt_diffusion = 0.20 * h * h / nu_abs
+
+            dt_required = min(dt_cfl, dt_diffusion, dt_max)
+
+            # IMPORTANT:
+            # Do NOT clamp upward to sim_params.dt_min here.
+            # At high velocity that would intentionally violate CFL.
+            self.solver.dt = float(dt_required)
+
+            self.solver.sim_params.adaptive_dt = True
+            self.control_panel.adaptive_dt_checkbox.blockSignals(True)
+            self.control_panel.adaptive_dt_checkbox.setChecked(True)
+            self.control_panel.adaptive_dt_checkbox.blockSignals(False)
+            self.control_panel.dt_spinbox.setValue(self.solver.dt)
+            actual_cfl = U_abs * self.solver.dt / h
+
+            logger.info(
+                f"AUTO-DT: U={new_U:.3f} m/s, "
+                f"Re={new_Re:.1f}, nu={new_nu:.6g}, "
+                f"dx={dx:.6f}, dy={dy:.6f}, "
+                f"dt_cfl={dt_cfl:.8f}, "
+                f"dt_diff={dt_diffusion:.8f}, "
+                f"dt={self.solver.dt:.8f}, "
+                f"CFL={actual_cfl:.4f}"
+            )
+
+            if actual_cfl > 0.25:
+                logger.warning(
+                    f"CFL={actual_cfl:.3f} is higher than expected."
+                )
 
             # Restore LES settings that were preserved
             self.solver.sim_params.use_les = current_use_les
@@ -147,6 +184,10 @@ class ParameterHandlers:
             self.solver.flow.nu = new_nu
             self.solver.flow.Re = new_Re
             self.solver.flow.L_char = L
+
+            # Recompile only after all physical parameters and dt
+            # have reached their final values.
+            self.solver._step_jit = self.solver.get_step_jit()
 
             # Suggest grid refinement for high Re
             if new_Re > 15000 and self.solver.grid.nx < 1024:
@@ -166,6 +207,8 @@ class ParameterHandlers:
             # The dt is set during solver initialization and should remain constant
 
             self.solver.iteration = 0
+            self.solver.simulated_time = 0.0
+            self.is_paused = False
             
             logger.info("Flow parameters applied")
             logger.info(f"  Constraints: U={self.solver.flow.constraints.lock_U}, nu={self.solver.flow.constraints.lock_nu}, Re={self.solver.flow.constraints.lock_Re}")
@@ -185,21 +228,6 @@ class ParameterHandlers:
             traceback.print_exc()
             self.control_panel.start_btn.setEnabled(True)
             self.control_panel.pause_btn.setEnabled(False)
-    
-    def on_lock_u_changed(self, state) -> None:
-        """Handle U lock checkbox change."""
-        # Lock validation removed - allow any number of locks
-        pass
-
-    def on_lock_nu_changed(self, state) -> None:
-        """Handle nu lock checkbox change."""
-        # Lock validation removed - allow any number of locks
-        pass
-
-    def on_lock_re_changed(self, state) -> None:
-        """Handle Re lock checkbox change."""
-        # Lock validation removed - allow any number of locks
-        pass
     
     def update_precision(self) -> None:
         """Update JAX precision setting and restart application."""
@@ -266,7 +294,7 @@ class ParameterHandlers:
         
         try:
             # Clear ALL JAX caches before grid type change
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
             
             # Clear existing JIT compilations
             if hasattr(self.solver, '_step_jit'):
@@ -451,7 +479,7 @@ class ParameterHandlers:
         
         try:
             # Clear ALL JAX caches before grid change
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
 
             # Re-import multigrid solver to force recompilation with new grid dimensions
             import importlib
@@ -672,16 +700,20 @@ class ParameterHandlers:
                 
                 # Clear everything
                 gc.collect()
-                jax.clear_caches()
+                invalidate_solver_cache(self.solver)
                 
                 # Reset simulation to very basic state
                 self.solver.iteration = 0
+                self.solver.simulated_time = 0.0
+                self.is_paused = False
             except Exception as ultra_error:
                 print(f"Warning: Ultra-conservative mode failed: {ultra_error}")
                 print("Attempting emergency restart...")
                 # Last resort: restart with minimal settings
                 try:
                     self.solver.iteration = 0
+                    self.solver.simulated_time = 0.0
+                    self.is_paused = False
                     self.solver.dt = 0.001  # Very conservative timestep
                 except Exception as emergency_error:
                     print(f"Emergency restart failed: {emergency_error}")
@@ -732,7 +764,7 @@ class ParameterHandlers:
             self.solver.geom.radius = jnp.array(new_radius)  # Store as 0D array
             
             # Clear JAX caches before recompiling with new geometry
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
             
             # Recompute mask with new radius
             self.solver.mask = self.solver._compute_mask()
@@ -787,6 +819,8 @@ class ParameterHandlers:
                 
                 # Reset iteration
                 self.solver.iteration = 0
+                self.solver.simulated_time = 0.0
+                self.is_paused = False
                 
                 logger.info(f"BC mode updated to {new_bc_mode}")
                 if new_bc_mode == 'supply':
@@ -828,7 +862,7 @@ class ParameterHandlers:
                 self.solver.sim_params.cylinder_spacing = new_spacing
             
             # Clear JAX caches before recompiling with new geometry
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
             
             # Recompute mask with new parameters
             self.solver.mask = self.solver._compute_mask()
@@ -887,7 +921,7 @@ class ParameterHandlers:
             self.solver.sim_params.adaptive_dt = False
 
             # Clear JAX caches
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
 
             # Recompile solver
             self.solver._step_jit = self.solver.get_step_jit()
@@ -908,6 +942,8 @@ class ParameterHandlers:
 
             # Reset iteration and history
             self.solver.iteration = 0
+            self.solver.simulated_time = 0.0
+            self.is_paused = False
             self.solver.u_prev = jnp.copy(self.solver.u)
             self.solver.v_prev = jnp.copy(self.solver.v)
             self.solver.history = {'time': [], 'dt': [], 'drag': [], 'lift': [],
@@ -995,7 +1031,7 @@ class ParameterHandlers:
             if hasattr(self.solver, '_step_jit'):
                 delattr(self.solver, '_step_jit')
 
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
 
             # Recompile step function with new LES settings using get_step_jit
             self.solver._step_jit = self.solver.get_step_jit()
@@ -1062,7 +1098,7 @@ class ParameterHandlers:
             if hasattr(self.solver, '_step_jit'):
                 delattr(self.solver, '_step_jit')
 
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
 
             # Recompile step function with new pressure solver
             self.solver._step_jit = self.solver.get_step_jit()
@@ -1106,7 +1142,7 @@ class ParameterHandlers:
         
         # Clear JIT cache since this affects the pressure solver
         import jax
-        jax.clear_caches()
+        invalidate_solver_cache(self.solver)
         if hasattr(self.solver, '_jit_cache'):
             self.solver._jit_cache.clear()
         if hasattr(self.solver, '_step_jit'):
@@ -1126,7 +1162,7 @@ class ParameterHandlers:
             new_dt = self.control_panel.dt_spinbox.value()
             
             # Clear ALL JAX caches before changing timestep
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
             
             # Clear any existing JIT compilations
             if hasattr(self.solver, '_step_jit'):
@@ -1311,7 +1347,7 @@ class ParameterHandlers:
                     pass
             
             # Clear JAX caches
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
             gc.collect()
             
             # Synchronize Tau slider if switching to LBM
@@ -1458,6 +1494,8 @@ class ParameterHandlers:
                 
                 # Reset iteration counter
                 self.solver.iteration = 0
+                self.solver.simulated_time = 0.0
+                self.is_paused = False
                 
                 # Clear JIT cache to force recompilation with new parameters
                 if hasattr(self.solver, '_step_jit'):

@@ -119,18 +119,19 @@ def poisson_fft_dirichlet_neumann(
     # ========================================================================
     else:  # taylor_green
         from jax.numpy.fft import rfft2, irfft2
-        
-        # Compute wavenumbers
-        kx = 2.0 * jnp.pi * jnp.fft.fftfreq(nx, dx)
-        ky = 2.0 * jnp.pi * jnp.fft.fftfreq(ny, dy)
-        
-        # Create 2D wavenumber grid
-        K2 = kx[:, None]**2 + ky[None, :]**2
-        K2 = K2.at[0, 0].set(1.0)  # Avoid division by zero
-        
-        # Solve in Fourier space
-        rhs_hat = rfft2(rhs)
-        p_hat = -rhs_hat / K2
+
+        # Eigenvalues of the same second-order discrete Laplacian used by
+        # solver.operators.  rfft2 stores only ny//2+1 modes on its last axis.
+        fx = jnp.fft.fftfreq(nx)
+        fy = jnp.fft.rfftfreq(ny)
+        eigenvalue = -4.0 * (
+            jnp.sin(jnp.pi * fx[:, None]) ** 2 / dx**2
+            + jnp.sin(jnp.pi * fy[None, :]) ** 2 / dy**2
+        )
+        eigenvalue = eigenvalue.at[0, 0].set(1.0)
+
+        rhs_hat = rfft2(rhs - jnp.mean(rhs))
+        p_hat = rhs_hat / eigenvalue
         p_hat = p_hat.at[0, 0].set(0.0)  # Set mean to zero
         
         # Inverse FFT

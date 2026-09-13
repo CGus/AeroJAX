@@ -106,6 +106,144 @@ def _compute_mask(self) -> jnp.ndarray:
         mask = 1.0 - chi  # 1 in fluid, 0 in solid
         self.sdf = sdf  # Store SDF for Brinkman penalization
         return mask
+    elif (
+        hasattr(self.sim_params, 'obstacle_type')
+        and self.sim_params.obstacle_type in ('solid_wall', 'urban_map')
+    ):
+        # Extended obstacle implementations currently live in
+        # mask_generator_clean.py. Route these obstacle types there so
+        # BaselineSolver uses the same implementations as the GUI.
+        from .mask_generator_clean import _compute_mask as _compute_extended_mask
+
+        mask = _compute_extended_mask(self)
+
+        # Tesla valve currently uses a direct fluid/solid mask rather than SDF.
+        if self.sim_params.obstacle_type == 'tesla_valve':
+            self.sdf = None
+
+        return mask
+
+    elif (
+        hasattr(self.sim_params, 'obstacle_type')
+        and self.sim_params.obstacle_type in ('solid_wall', 'urban_map')
+    ):
+        # Extended obstacle implementations currently live in
+        # mask_generator_clean.py. Route these obstacle types there so
+        # BaselineSolver uses the same implementations as the GUI.
+        from .mask_generator_clean import _compute_mask as _compute_extended_mask
+
+        mask = _compute_extended_mask(self)
+
+        # Tesla valve currently uses a direct fluid/solid mask rather than SDF.
+        if self.sim_params.obstacle_type == 'tesla_valve':
+            self.sdf = None
+
+        return mask
+
+    elif hasattr(self.sim_params, 'obstacle_type') and self.sim_params.obstacle_type == 'tesla_valve':
+        # Final Tesla Valve geometry.
+        # Uses the validated user-customized PNG mask.
+        #
+        # Convention:
+        #   white = fluid = 1
+        #   black = solid = 0
+        #
+        # Geometry is identical in forward/backward mode.
+        # Flow direction is a separate physical property.
+
+        from pathlib import Path
+        import numpy as np
+        from PIL import Image
+
+        project_root = Path(__file__).resolve().parents[2]
+        mask_path = project_root / "assets" / "tesla_valve_mask.png"
+
+        if not mask_path.exists():
+            raise FileNotFoundError(
+                f"Tesla valve mask not found: {mask_path}"
+            )
+
+        img = Image.open(mask_path).convert("L")
+
+        # AeroJAX grid uses shape (nx, ny).
+        nx, ny = self.grid.X.shape
+
+        # PIL uses (width, height), therefore resize to (nx, ny)
+        # and transpose numpy result back to AeroJAX (nx, ny).
+        img = img.resize(
+            (int(nx), int(ny)),
+            Image.Resampling.NEAREST
+        )
+
+        mask_np = np.asarray(img, dtype=np.uint8).T
+
+        mask = jnp.asarray(
+            np.where(mask_np >= 128, 1.0, 0.0),
+            dtype=jnp.float32
+        )
+
+        self.sdf = None
+
+        print(
+            f"Tesla valve PNG mask loaded: {mask_path} "
+            f"source={img.size}, grid={mask.shape}, "
+            f"forward={getattr(self.sim_params, 'tesla_valve_forward', True)}"
+        )
+
+        return mask
+
+    elif hasattr(self.sim_params, 'obstacle_type') and self.sim_params.obstacle_type == 'tesla_valve':
+        # Final Tesla Valve geometry.
+        # Uses the validated user-customized PNG mask.
+        #
+        # Convention:
+        #   white = fluid = 1
+        #   black = solid = 0
+        #
+        # Geometry is identical in forward/backward mode.
+        # Flow direction is a separate physical property.
+
+        from pathlib import Path
+        import numpy as np
+        from PIL import Image
+
+        project_root = Path(__file__).resolve().parents[2]
+        mask_path = project_root / "assets" / "tesla_valve_mask.png"
+
+        if not mask_path.exists():
+            raise FileNotFoundError(
+                f"Tesla valve mask not found: {mask_path}"
+            )
+
+        img = Image.open(mask_path).convert("L")
+
+        # AeroJAX grid uses shape (nx, ny).
+        nx, ny = self.grid.X.shape
+
+        # PIL uses (width, height), therefore resize to (nx, ny)
+        # and transpose numpy result back to AeroJAX (nx, ny).
+        img = img.resize(
+            (int(nx), int(ny)),
+            Image.Resampling.NEAREST
+        )
+
+        mask_np = np.asarray(img, dtype=np.uint8).T
+
+        mask = jnp.asarray(
+            np.where(mask_np >= 128, 1.0, 0.0),
+            dtype=jnp.float32
+        )
+
+        self.sdf = None
+
+        print(
+            f"Tesla valve PNG mask loaded: {mask_path} "
+            f"source={img.size}, grid={mask.shape}, "
+            f"forward={getattr(self.sim_params, 'tesla_valve_forward', True)}"
+        )
+
+        return mask
+
     elif hasattr(self.sim_params, 'obstacle_type') and self.sim_params.obstacle_type == 'custom':
         # Check if this is a PNG mask (already resized to grid dimensions)
         png_mask = getattr(self.sim_params, 'grayscale_penalization', None)

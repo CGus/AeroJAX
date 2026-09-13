@@ -213,114 +213,148 @@ def _compute_mask(self):
             print(f"DEBUG urban_map: Mask min={mask.min():.3f}, max={mask.max():.3f}, mean={mask.mean():.3f}")
             return mask
     elif hasattr(self.sim_params, 'obstacle_type') and self.sim_params.obstacle_type == 'tesla_valve':
-        
-        def sdf_tesla_valve_simple(X, Y, valve_x, valve_y, stage_length, num_stages, main_width, branch_width, angle):
-            """Hard-coded, bulletproof Tesla valve SDF"""
-            
-            # Shift to valve coordinates
-            total_width = stage_length * num_stages
-            x_shifted = X - valve_x
-            y_shifted = Y - valve_y
-            
-            # Start with the main channel (open space, so POSITIVE SDF)
-            # Main channel is a rectangle from -total_width/2 to total_width/2 in x,
-            # and from -main_width/2 to main_width/2 in y
-            channel_x = jnp.abs(x_shifted) - total_width/2
-            channel_y = jnp.abs(y_shifted) - main_width/2
-            channel_sdf = jnp.maximum(channel_x, channel_y)  # Positive outside channel, negative inside channel
-            
-            # Now add diagonal vanes as SOLID obstacles (NEGATIVE SDF where they are)
-            vane_sdf = jnp.full_like(X, 1e6)  # Start with large positive (no vane)
-            
-            # Diagonal vane geometry
-            # We'll create a rotated rectangle for ONE vane, then duplicate it
-            for stage in range(num_stages):
-                # Stage x-range
-                stage_start = -total_width/2 + stage * stage_length
-                stage_end = stage_start + stage_length
-                stage_center_x = stage_start + stage_length/2
-                
-                # Vane position within stage (offset from left edge)
-                vane_offset = stage_length * 0.3  # 30% into stage
-                vane_x = stage_start + vane_offset
-                
-                # Length of vane: must span from wall to reach into channel
-                # Calculate required length to reach center of channel
-                required_len = (main_width/2) / jnp.sin(jnp.abs(angle))
-                vane_len = required_len * 1.1  # 10% extra for overlap
-                
-                # ---------- TOP VANE (starts at top wall, points down-right) ----------
-                # Vane from (vane_x, main_width/2) to (vane_x + vane_len*cos(angle), main_width/2 - vane_len*sin(angle))
-                start_x = vane_x
-                start_y = main_width/2
-                end_x = start_x + vane_len * jnp.cos(angle)
-                end_y = start_y - vane_len * jnp.sin(angle)
-                center_x = (start_x + end_x) / 2
-                center_y = (start_y + end_y) / 2
-                
-                # Rotated rectangle SDF
-                cos_a = jnp.cos(angle)
-                sin_a = jnp.sin(angle)
-                x_rel = x_shifted - center_x
-                y_rel = y_shifted - center_y
-                x_rot = x_rel * cos_a + y_rel * sin_a
-                y_rot = y_rel * cos_a - x_rel * sin_a
-                dx = jnp.abs(x_rot) - vane_len/2
-                dy = jnp.abs(y_rot) - branch_width/2
-                outside = jnp.sqrt(jnp.maximum(dx, 0)**2 + jnp.maximum(dy, 0)**2)
-                inside = jnp.minimum(jnp.maximum(dx, dy), 0.0)
-                top_vane = -(outside + inside)  # NEGATIVE inside of vane (solid)
-                
-                # ---------- BOTTOM VANE (starts at bottom wall, points up-right) ----------
-                start_x = vane_x
-                start_y = -main_width/2
-                end_x = start_x + vane_len * jnp.cos(angle)
-                end_y = start_y + vane_len * jnp.sin(angle)
-                center_x = (start_x + end_x) / 2
-                center_y = (start_y + end_y) / 2
-                
-                x_rel = x_shifted - center_x
-                y_rel = y_shifted - center_y
-                x_rot = x_rel * cos_a + y_rel * sin_a
-                y_rot = y_rel * cos_a - x_rel * sin_a
-                dx = jnp.abs(x_rot) - vane_len/2
-                dy = jnp.abs(y_rot) - branch_width/2
-                outside = jnp.sqrt(jnp.maximum(dx, 0)**2 + jnp.maximum(dy, 0)**2)
-                inside = jnp.minimum(jnp.maximum(dx, dy), 0.0)
-                bottom_vane = -(outside + inside)  # NEGATIVE inside of vane (solid)
-                
-                # Combine vanes (take the minimum/most negative SDF)
-                vane_sdf = jnp.minimum(vane_sdf, top_vane)
-                vane_sdf = jnp.minimum(vane_sdf, bottom_vane)
-            
-            # Final SDF: channel (positive outside) combined with vanes (negative where solid)
-            # Take the minimum: if either channel OR vane says solid, it's solid
-            final_sdf = jnp.minimum(channel_sdf, vane_sdf)
-            
-            return final_sdf
-        
-        # Parameters from UI
-        num_stages = getattr(self.sim_params, 'tesla_valve_stages', 3)
-        stage_length = getattr(self.sim_params, 'tesla_valve_stage_length', 1.5)
-        main_width = getattr(self.sim_params, 'tesla_valve_main_width', 0.4)
-        branch_width = getattr(self.sim_params, 'tesla_valve_branch_width', 0.15)
-        branch_angle = getattr(self.sim_params, 'tesla_valve_branch_angle', 0.6)  # radians
-        valve_x = getattr(self.sim_params, 'tesla_valve_x', self.grid.lx * 0.5)
-        valve_y = getattr(self.sim_params, 'tesla_valve_y', self.grid.ly * 0.5)
-        is_forward = getattr(self.sim_params, 'tesla_valve_forward', True)
-        
-        if not is_forward:
-            branch_angle = -branch_angle
-        
-        # Compute SDF using bulletproof function
-        sdf = sdf_tesla_valve_simple(self.grid.X, self.grid.Y, valve_x, valve_y, 
-                                      stage_length, num_stages, main_width, 
-                                      branch_width, branch_angle)
-        
-        # Convert to mask
-        epsilon = self.sim_params.eps
-        mask = jnp.where(sdf > -epsilon, 1.0, 0.0)
-        
+        # Tesla-type valvular conduit.
+        #
+        # mask convention:
+        #   1.0 = fluid
+        #   0.0 = solid
+        #
+        # Geometry:
+        # - straight main channel
+        # - asymmetric smooth bypass per stage
+        # - solid island naturally remains between main path and bypass
+        #
+        # The geometry itself NEVER changes between forward/backward flow.
+
+        X, Y = self.grid.X, self.grid.Y
+
+        num_stages = int(getattr(
+            self.sim_params, 'tesla_valve_stages', 3
+        ))
+        stage_length = float(getattr(
+            self.sim_params, 'tesla_valve_stage_length', 2.0
+        ))
+        main_width = float(getattr(
+            self.sim_params, 'tesla_valve_main_width', 0.55
+        ))
+        branch_width = float(getattr(
+            self.sim_params, 'tesla_valve_branch_width', 0.22
+        ))
+        diagonal_length = float(getattr(
+            self.sim_params, 'tesla_valve_diagonal_length', 0.8
+        ))
+
+        valve_x = float(getattr(
+            self.sim_params, 'tesla_valve_x', self.grid.lx * 0.5
+        ))
+        valve_y = float(getattr(
+            self.sim_params, 'tesla_valve_y', self.grid.ly * 0.5
+        ))
+
+        def tube_segment(x1, y1, x2, y2, radius):
+            vx = x2 - x1
+            vy = y2 - y1
+            vv = vx * vx + vy * vy + 1e-12
+
+            t = ((X - x1) * vx + (Y - y1) * vy) / vv
+            t = jnp.clip(t, 0.0, 1.0)
+
+            px = x1 + t * vx
+            py = y1 + t * vy
+
+            d2 = (X - px) ** 2 + (Y - py) ** 2
+            return d2 <= radius ** 2
+
+        def quadratic_bezier_tube(p0, p1, p2, radius, segments=18):
+            result = jnp.zeros_like(X, dtype=bool)
+
+            prev_x, prev_y = p0
+
+            for k in range(1, segments + 1):
+                t = k / segments
+                omt = 1.0 - t
+
+                x = (
+                    omt * omt * p0[0]
+                    + 2.0 * omt * t * p1[0]
+                    + t * t * p2[0]
+                )
+                y = (
+                    omt * omt * p0[1]
+                    + 2.0 * omt * t * p1[1]
+                    + t * t * p2[1]
+                )
+
+                result = result | tube_segment(
+                    prev_x, prev_y, x, y, radius
+                )
+
+                prev_x, prev_y = x, y
+
+            return result
+
+        # Main passage extends across the whole computational domain.
+        fluid = jnp.abs(Y - valve_y) <= main_width * 0.5
+
+        total_length = num_stages * stage_length
+        x_start = valve_x - total_length * 0.5
+
+        bypass_radius = max(branch_width * 0.5, 0.055)
+
+        # Height of the bypass above the main conduit.
+        bypass_height = max(
+            main_width * 1.65,
+            diagonal_length
+        )
+
+        for i in range(num_stages):
+            sx = x_start + i * stage_length
+
+            # Asymmetric connection locations.
+            # Short/steep entrance + long/gentle return.
+            x_in = sx + stage_length * 0.18
+            x_top = sx + stage_length * 0.43
+            x_out = sx + stage_length * 0.90
+
+            y_wall = valve_y + main_width * 0.38
+            y_top = valve_y + main_width * 0.5 + bypass_height
+
+            # Steep branch leaving main conduit.
+            branch_up = quadratic_bezier_tube(
+                (x_in, y_wall),
+                (
+                    sx + stage_length * 0.20,
+                    valve_y + bypass_height * 0.95
+                ),
+                (x_top, y_top),
+                bypass_radius,
+                segments=14
+            )
+
+            # Long curved return downstream.
+            branch_return = quadratic_bezier_tube(
+                (x_top, y_top),
+                (
+                    sx + stage_length * 0.78,
+                    y_top
+                ),
+                (x_out, y_wall),
+                bypass_radius,
+                segments=22
+            )
+
+            fluid = fluid | branch_up | branch_return
+
+        self.sdf = None
+        mask = jnp.where(fluid, 1.0, 0.0)
+
+        print(
+            f"Tesla valve V2 mask: stages={num_stages}, "
+            f"L={stage_length:.2f}, main={main_width:.2f}, "
+            f"branch={branch_width:.2f}, "
+            f"position=({valve_x:.2f}, {valve_y:.2f})"
+        )
+
         return mask
     else:
         # Fallback to cylinder if no custom mask - SHARP mask

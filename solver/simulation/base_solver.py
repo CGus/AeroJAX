@@ -33,7 +33,7 @@ from .initializers import _initialize_von_karman_flow, _initialize_cavity_flow, 
 from .mask_generator import _compute_mask
 from .step_handlers import _step, _step_collocated, _step_mac, get_step_jit
 from .flow_control import apply_flow_type, set_obstacle_type, update_naca_angle, inject_dye, set_adaptive_dt, set_fixed_dt
-from .visualization_step import step_pure_profiled, step_for_visualization
+from .visualization_step import step_pure_profiled, step_for_visualization, advance_steps, visualization_fields
 
 # Import timestep controllers
 try:
@@ -299,7 +299,6 @@ class BaselineSolver:
         
         # Grid-consistent ε
         from ..params import compute_eps_multiplier
-        jax.clear_caches()  # Clear JIT cache to ensure new code is compiled
         if self.sim_params.auto_eps_multiplier:
             self.sim_params.eps_multiplier = compute_eps_multiplier(self.flow.Re)
             print(f"Auto-computed eps_multiplier = {self.sim_params.eps_multiplier} from Re = {self.flow.Re:.1f}")
@@ -319,10 +318,8 @@ class BaselineSolver:
         
         self._jit_cache = {}
         try:
-            # Force adaptive_dt=False to prevent dt mismatch
-            self.sim_params.adaptive_dt = False
             self._step_jit = self.get_step_jit()
-            print(f"Successfully initialized _step_jit with adaptive_dt=False")
+            print(f"Successfully initialized _step_jit")
         except Exception as e:
             print(f"ERROR: Failed to initialize _step_jit: {e}")
             import traceback
@@ -356,6 +353,7 @@ class BaselineSolver:
             'airfoil_metrics': {'CL': [], 'CD': [], 'stagnation_x': [], 'separation_x': [], 'Cp_min': [], 'wake_deficit': [], 'strouhal': [], 'time': []}
         }
         self.iteration = 0
+        self.simulated_time = 0.0
         
         self.u_prev = jnp.copy(self.u)
         self.v_prev = jnp.copy(self.v)
@@ -426,3 +424,6 @@ BaselineSolver.set_adaptive_dt = set_adaptive_dt
 BaselineSolver.set_fixed_dt = set_fixed_dt
 BaselineSolver.step_pure_profiled = step_pure_profiled
 BaselineSolver.step_for_visualization = step_for_visualization
+
+BaselineSolver.advance_steps = advance_steps
+BaselineSolver.visualization_fields = visualization_fields

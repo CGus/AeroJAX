@@ -999,83 +999,85 @@ class ObstacleRenderer:
             traceback.print_exc()
     
     def _draw_tesla_valve_outline(self, solver):
-        """Draw Tesla valve outline by drawing individual diagonal branches separately"""
+        """Draw Tesla valve outline directly from the CFD mask."""
         try:
             from PyQt6.QtGui import QPainterPath
             from PyQt6.QtCore import QPointF
             import numpy as np
-            import math
-            
-            # Get Tesla valve parameters from sim_params
-            num_stages = getattr(solver.sim_params, 'tesla_valve_stages', 3)
-            stage_length = getattr(solver.sim_params, 'tesla_valve_stage_length', 1.5)
-            main_width = getattr(solver.sim_params, 'tesla_valve_main_width', 0.4)
-            branch_width = getattr(solver.sim_params, 'tesla_valve_branch_width', 0.2)
-            branch_angle = getattr(solver.sim_params, 'tesla_valve_branch_angle', 35.0)
-            diagonal_length = getattr(solver.sim_params, 'tesla_valve_diagonal_length', 0.4)
-            
-            # Ensure branch_angle is always in degrees for consistent cache key
-            if isinstance(branch_angle, float) and branch_angle > 2 * math.pi:
-                # Already in degrees
-                pass
-            elif isinstance(branch_angle, float) and branch_angle <= 2 * math.pi:
-                # Convert from radians to degrees
-                branch_angle = math.degrees(branch_angle)
-            
-            # Get position from sim_params (same as mask generator)
-            valve_x = getattr(solver.sim_params, 'tesla_valve_x', solver.grid.lx * 0.25)
-            valve_y = getattr(solver.sim_params, 'tesla_valve_y', solver.grid.ly * 0.5)
-            
-            # Create a cache key to avoid regenerating outline every frame
-            cache_key = (num_stages, stage_length, main_width, branch_width, 
-                         branch_angle, diagonal_length, valve_x, valve_y,
-                         solver.grid.lx, solver.grid.ly)
-            
-            # Check if we have cached outline
-            if not hasattr(self, '_tesla_valve_outline_cache'):
-                self._tesla_valve_outline_cache = {}
-            
-            if cache_key in self._tesla_valve_outline_cache:
-                path = self._tesla_valve_outline_cache[cache_key]
+            import matplotlib.pyplot as plt
+
+            mask = getattr(solver, 'mask', None)
+            if mask is None:
+                return
+
+            mask_np = np.asarray(mask)
+
+            # Solver convention:
+            #   1 = fluid
+            #   0 = solid
+            # Therefore the physical boundary is mask = 0.5.
+            X = np.asarray(solver.grid.X)
+            Y = np.asarray(solver.grid.Y)
+
+            if X.shape == mask_np.shape and Y.shape == mask_np.shape:
+                x_coords = X[:, 0]
+                y_coords = Y[0, :]
             else:
-                # Generate outline only when parameters change
-                path = self._generate_tesla_valve_outline(solver, num_stages, stage_length, 
-                                                        main_width, branch_width, branch_angle,
-                                                        diagonal_length, valve_x, valve_y)
-                self._tesla_valve_outline_cache[cache_key] = path
-            
-            # Draw using existing outline items (same pattern as cylinder)
-            if (self.vel_outline is not None and 
-                hasattr(self.vel_outline, 'setPath') and 
-                not sip.isdeleted(self.vel_outline)):
-                self.vel_outline.setPath(path)
-                self.vel_outline.setVisible(self.show_outlines)
-            
-            if (self.div_outline is not None and
-                hasattr(self.div_outline, 'setPath') and
-                not sip.isdeleted(self.div_outline)):
-                self.div_outline.setPath(path)
+                x_coords = np.asarray(solver.grid.x)
+                y_coords = np.asarray(solver.grid.y)
 
-            if (self.vort_outline is not None and
-                hasattr(self.vort_outline, 'setPath') and
-                not sip.isdeleted(self.vort_outline)):
-                self.vort_outline.setPath(path)
+            fig, ax = plt.subplots()
+            contours = ax.contour(
+                x_coords,
+                y_coords,
+                mask_np.T,
+                levels=[0.5]
+            )
 
-            if (self.scalar_outline is not None and
-                hasattr(self.scalar_outline, 'setPath') and
-                not sip.isdeleted(self.scalar_outline)):
-                self.scalar_outline.setPath(path)
+            path = QPainterPath()
 
-            if (self.pressure_outline is not None and
-                hasattr(self.pressure_outline, 'setPath') and
-                not sip.isdeleted(self.pressure_outline)):
-                self.pressure_outline.setPath(path)
+            if hasattr(contours, 'allsegs') and contours.allsegs:
+                for seg in contours.allsegs[0]:
+                    if len(seg) < 2:
+                        continue
+
+                    path.moveTo(
+                        QPointF(float(seg[0, 0]), float(seg[0, 1]))
+                    )
+
+                    for x, y in seg[1:]:
+                        path.lineTo(QPointF(float(x), float(y)))
+
+                    # Close only genuinely closed contours.
+                    if np.linalg.norm(seg[0] - seg[-1]) < 1e-6:
+                        path.closeSubpath()
+
+            plt.close(fig)
+
+            outline_items = (
+                self.vel_outline,
+                self.div_outline,
+                self.vort_outline,
+                self.scalar_outline,
+                self.pressure_outline,
+            )
+
+            for item in outline_items:
+                if (
+                    item is not None
+                    and hasattr(item, 'setPath')
+                    and not sip.isdeleted(item)
+                ):
+                    item.setPath(path)
+                    item.setVisible(self.show_outlines)
+
+            print("Tesla valve outline generated directly from CFD mask")
 
         except Exception as e:
-            print(f"Error drawing Tesla valve outline: {e}")
+            print(f"Error drawing Tesla valve mask outline: {e}")
             import traceback
             traceback.print_exc()
-    
+
     def _generate_tesla_valve_outline(self, solver, num_stages, stage_length, main_width, 
                                      branch_width, branch_angle, diagonal_length, valve_x, valve_y):
         """Generate Tesla valve outline using rotated rectangles matching the mask"""

@@ -27,7 +27,7 @@ class CollapsibleGroupBox(QFrame):
             CollapsibleGroupBox {
                 border: 1px solid #888;
                 border-radius: 4px;
-                background-color: #f5f5f5;
+                background-color: transparent;
                 margin: 2px;
             }
         """)

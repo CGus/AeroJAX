@@ -1,0 +1,13 @@
+{
+  "status": "design_only_no_physicsnemo_installed",
+  "model": "PhysicsNeMo FNO 2D geometry-conditioned",
+  "formulation": "state_t + geometry + resolved_parameters + delta_time -> state_t_plus_delta",
+  "outputs": ["u", "v", "p"],
+  "conditioning": ["mask", "sdf/L", "U_inf", "nu", "inlet_direction", "geometry_AoA", "delta_time", "dx", "dy", "BC_encoding"],
+  "initial_capacity": {"layers": 4, "width": 32, "modes": [16, 12], "padding": "nonperiodic constant, benchmark at boundaries"},
+  "normalization": "training split only; explicit pressure gauge; condition on dt between exported frames",
+  "losses": ["fluid-weighted field loss", "near-wall field loss", "rollout loss", "teacher-consistent divergence diagnostic"],
+  "curriculum": ["one-step", "2-step", "4-step", "8-step", "long rollout validation without teacher forcing"],
+  "acceptance_proposal": {"field_relative_L2": 0.05, "energy_relative": 0.05, "CL_CD_relative_or_absolute_floor": 0.1, "rollout_steps": 1000},
+  "notes": ["Proposed thresholds, not achieved results", "Raster geometry support does not imply learned generalization", "No exact zero-divergence target imposed on the imperfect teacher"]
+}

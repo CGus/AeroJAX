@@ -25,7 +25,7 @@ class SDFVisualization:
     
     def update_sdf_visualization(self, solver):
         """Update SDF visualization overlay"""
-        if not hasattr(solver, 'mask') or solver is None:
+        if not self.is_visible or solver is None or not hasattr(solver, 'mask'):
             return
     
         try:

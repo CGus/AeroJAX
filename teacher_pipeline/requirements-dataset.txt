@@ -1,0 +1,3 @@
+# Install in an isolated target/venv with access to the frozen teacher environment.
+# Do not upgrade JAX, CUDA, NumPy or the existing teacher environment.
+h5py==3.16.0

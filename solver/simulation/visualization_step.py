@@ -210,49 +210,64 @@ def step_for_visualization(self, compute_vorticity: bool = True, compute_diverge
     Returns:
         u, v, vort, div (divergence may be None if not requested)
     """
-    # Perform step using JIT-compiled step function
-    u_new, v_new, p = self._step_jit(self.u, self.v, self.mask, self.dt)
-    
-    # Update velocity fields
-    self.u_prev = jnp.copy(self.u)
-    self.v_prev = jnp.copy(self.v)
-    self.u = u_new
-    self.v = v_new
-    self.current_pressure = p
-    self.iteration += 1
-    
-    # Compute vorticity for visualization
-    if compute_vorticity:
-        if self.sim_params.grid_type == 'mac' and MAC_OPERATORS_AVAILABLE:
-            if self.sim_params.flow_type == 'von_karman':
-                from solver.operators_mac import vorticity_nonperiodic_staggered
-                vort = vorticity_nonperiodic_staggered(self.u, self.v, self.grid.dx, self.grid.dy)
-            else:
-                from solver.operators_mac import vorticity_staggered
-                vort = vorticity_staggered(self.u, self.v, self.grid.dx, self.grid.dy)
-        else:
-            if self.sim_params.flow_type == 'von_karman':
-                vort = vorticity_nonperiodic(self.u, self.v, self.grid.dx, self.grid.dy)
-            else:
-                vort = vorticity(self.u, self.v, self.grid.dx, self.grid.dy)
+    self.advance_steps(1)
+    return self.visualization_fields(compute_vorticity, compute_divergence)
+
+
+def advance_steps(self, count=1):
+    """Advance on device; no field transfer or display work inside the loop.
+
+    Adaptive mode applies conservative CFL/diffusion limits on every device step.
+    """
+    count = int(count)
+    if count < 1:
+        raise ValueError("count must be positive")
+    if not 0 < float(self.dt) < float('inf'):
+        raise ValueError("dt must be finite and positive")
+    self._step_jit = self.get_step_jit()
+    if getattr(self, '_batch_jit', None) is None:
+        step = self._step_jit
+        adaptive = self.sim_params.adaptive_dt
+        h = min(self.grid.dx, self.grid.dy)
+        speed = abs(float(self.flow.U_inf))
+        velocity_cfl = .035 if speed > 8 else .05 if speed > 5 else .08 if speed > 3 else .12 if speed > 1.5 else .20
+        from solver.params import get_re_parameters
+        re_limits = get_re_parameters(self.flow.Re, self.grid.nx)
+        cfl = min(float(self.sim_params.max_cfl), velocity_cfl, re_limits['cfl_target'])
+        diffusion_dt = .20 * h * h / max(float(self.flow.nu), 1e-12)
+        dt_max = float(self.sim_params.dt_max)
+        @jax.jit
+        def batch(u, v, p, mask, dt, iteration, n):
+            def body(i, state):
+                u, v, p, _, _, elapsed, used_dt = state
+                if adaptive:
+                    # Directional upper bound works for collocated and MAC shapes.
+                    local_speed = jnp.maximum(jnp.max(jnp.abs(u)) + jnp.max(jnp.abs(v)), 1.5 * speed)
+                    used_dt = jnp.minimum(cfl * h / jnp.maximum(local_speed, 1e-8),
+                                          min(diffusion_dt, dt_max))
+                un, vn, pn = step(u, v, mask, used_dt, iteration + i)
+                return un, vn, pn, u, v, elapsed + used_dt, used_dt
+            return jax.lax.fori_loop(0, n, body, (u, v, p, u, v, jnp.asarray(0., u.dtype), jnp.asarray(dt, u.dtype)))
+        self._batch_jit = batch
+    self.u, self.v, self.current_pressure, self.u_prev, self.v_prev, elapsed, last_dt = self._batch_jit(
+        self.u, self.v, self.current_pressure, self.mask, self.dt, self.iteration, count)
+    self.iteration += count
+    if self.sim_params.adaptive_dt:
+        elapsed, last_dt = jax.device_get((elapsed, last_dt))  # Two scalars, never full fields.
+        self.dt = float(last_dt)
+        advance = float(elapsed)
     else:
-        vort = jnp.zeros_like(self.u)
-    
-    # Compute divergence for visualization (only if requested)
-    if compute_divergence:
-        if self.sim_params.grid_type == 'mac' and MAC_OPERATORS_AVAILABLE:
-            if self.sim_params.flow_type == 'von_karman':
-                from solver.operators_mac import divergence_nonperiodic_staggered
-                div = divergence_nonperiodic_staggered(self.u, self.v, self.grid.dx, self.grid.dy)
-            else:
-                from solver.operators_mac import divergence_staggered
-                div = divergence_staggered(self.u, self.v, self.grid.dx, self.grid.dy)
-        else:
-            if self.sim_params.flow_type == 'von_karman':
-                div = divergence_nonperiodic(self.u, self.v, self.grid.dx, self.grid.dy)
-            else:
-                div = divergence(self.u, self.v, self.grid.dx, self.grid.dy)
-    else:
-        div = None
-    
+        advance = count * float(self.dt)
+    self.simulated_time = getattr(self, 'simulated_time', 0.0) + advance
+    if hasattr(self, 'state'):
+        from dataclasses import replace
+        self.state = replace(self.state, u=self.u, v=self.v, p=self.current_pressure,
+                             u_prev=self.u_prev, v_prev=self.v_prev, c=self.c,
+                             dt=self.dt, iteration=self.iteration)
+
+
+def visualization_fields(self, compute_vorticity=True, compute_divergence=False):
+    """Extract derived fields without advancing physical time."""
+    vort = self._vorticity(self.u, self.v, self.grid.dx, self.grid.dy) if compute_vorticity else None
+    div = self._divergence(self.u, self.v, self.grid.dx, self.grid.dy) if compute_divergence else None
     return self.u, self.v, vort, div

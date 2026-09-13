@@ -278,7 +278,7 @@ class FlowVisualization:
         
         # Only setup plots if not skipping (e.g., when recreating for grid update)
         if not skip_initial_setup:
-            self.setup_plots()
+            self.setup_plots(self.current_nx, self.current_ny, self.current_lx, self.current_ly)
             self.set_initial_colormaps()
     
     def update_profiling_overlay(self, solver_ms, interp_ms, total_ms, sim_fps, viz_data=None):
@@ -569,7 +569,7 @@ class FlowVisualization:
                 pass
         
         # Create enhanced error plot with multiple metrics (right column)
-        self.l2_plot = self.plot_widget.addPlot(title="Error Metrics", row=2, col=1, colspan=1)
+        self.l2_plot = self.plot_widget.addPlot(title="Error Metrics", row=5, col=0, colspan=2)
         self.l2_plot.setLabel('left', 'Error')
         self.l2_plot.setLabel('bottom', 'Time')
         self.l2_plot.setVisible(False)  # Hidden by default
@@ -578,7 +578,7 @@ class FlowVisualization:
         self.l2_plot.setXRange(0, 1)  # Start with range from 0, will expand as data grows
 
         # Row 3: Cd plot (spans 2 columns) - below dye/error plots
-        self.cd_plot = self.plot_widget.addPlot(title="Drag Coefficient (Cd)", row=3, col=0, colspan=2)
+        self.cd_plot = self.plot_widget.addPlot(title="Drag Coefficient (Cd)", row=6, col=0, colspan=2)
         self.cd_plot.setLabel('left', 'Cd (normalized)')
         self.cd_plot.setLabel('bottom', 'Time')
         self.cd_plot.showGrid(x=True, y=True)
@@ -1814,10 +1814,9 @@ class FlowVisualization:
         # Using fixed levels instead
         # if self.level_update_counter % self.level_update_interval == 0:
         
-        # Update obstacle outlines (less frequent)
-        if self.obstacle_renderer is not None and self.solver is not None:
-            if self.level_update_counter % 5 == 0:  # Update every 5 frames instead of every frame
-                self.obstacle_renderer.update_obstacle_outlines(self.solver)
+        # VWT optimization:
+        # Static obstacle outlines are updated explicitly when geometry changes.
+        # Do not recompute them periodically during visualization.
         
         # Update streamlines (less frequent for performance)
         if self.show_streamlines and self.solver is not None:
@@ -2356,13 +2355,26 @@ class FlowVisualization:
             
             if obstacle_type == 'cow':
                 naca_display = "Cow"
-                aoa_display = "AoA - Probably?"
+                aoa_display = "N/A"
             elif obstacle_type == 'cylinder':
                 naca_display = "Cylinder"
                 aoa_display = "N/A"
+            elif obstacle_type == 'custom':
+                naca_display = "Custom PNG"
+                aoa_display = "N/A"
+            elif obstacle_type == 'three_cylinder_array':
+                naca_display = "3 Cylinders"
+                aoa_display = "N/A"
+            elif obstacle_type == 'solid_wall':
+                naca_display = "Solid Wall"
+                aoa_display = "N/A"
+            elif obstacle_type == 'urban_map':
+                naca_display = "Urban Map"
+                aoa_display = "N/A"
+            elif obstacle_type == 'tesla_valve':
+                naca_display = "Tesla Valve"
+                aoa_display = "N/A"
             else:
-                # Use HTML subscript for "inlet"
-                # Check if naca already contains "NACA" to avoid duplication
                 naca_display = naca if naca.upper().startswith('NACA') else f"NACA {naca}"
                 aoa_display = f"{aoa:.1f}° AoA"
             

@@ -1,3 +1,4 @@
+from solver.config import invalidate_solver_cache
 """
 Flow type manager for the CFD viewer.
 Handles flow type selection and application.
@@ -174,7 +175,7 @@ class FlowManager:
                             self.solver.sim_params.cow_y = new_cow_y
                         # Clear JAX caches to force recompilation of cow mask with new position
                         import jax
-                        jax.clear_caches()
+                        invalidate_solver_cache(self.solver)
                 elif current_obstacle_type_for_position == 'three_cylinder_array':
                     if current_three_cylinder_x != new_three_cylinder_x or current_three_cylinder_y != new_three_cylinder_y:
                         position_changed = True
@@ -300,7 +301,7 @@ class FlowManager:
             
             # Recompile solver
             self.solver.mask = self.solver._compute_mask()
-            jax.clear_caches()
+            invalidate_solver_cache(self.solver)
             self.solver._step_jit = self.solver.get_step_jit()
             
             # Stop simulation completely before recreating shared buffers
@@ -509,11 +510,11 @@ class FlowManager:
             else:
                 self.solver.sim_params.cow_x = x_position
         elif obstacle_type == 'three_cylinder_array':
-            # Update cylinder array x-position
-            if hasattr(self.solver.sim_params, 'cylinder_x'):
-                self.solver.sim_params.cylinder_x = x_position
-            else:
-                self.solver.sim_params.cylinder_x = x_position
+            self.solver.sim_params.cylinder_x = x_position
+        elif obstacle_type == 'tesla_valve':
+            self.solver.sim_params.tesla_valve_x = x_position
+        elif obstacle_type == 'custom':
+            self.solver.sim_params.custom_x = x_position
         
         # Recompute mask with new position
         self.solver.mask = self.solver._compute_mask()
@@ -543,11 +544,11 @@ class FlowManager:
             else:
                 self.solver.sim_params.cow_y = y_position
         elif obstacle_type == 'three_cylinder_array':
-            # Update cylinder array y-position
-            if hasattr(self.solver.sim_params, 'cylinder_y'):
-                self.solver.sim_params.cylinder_y = y_position
-            else:
-                self.solver.sim_params.cylinder_y = y_position
+            self.solver.sim_params.cylinder_y = y_position
+        elif obstacle_type == 'tesla_valve':
+            self.solver.sim_params.tesla_valve_y = y_position
+        elif obstacle_type == 'custom':
+            self.solver.sim_params.custom_y = y_position
         
         # Recompute mask with new position
         self.solver.mask = self.solver._compute_mask()
@@ -576,7 +577,7 @@ class FlowManager:
         print(f"Hyper-viscosity ratio updated to {nu_hyper_ratio:.3f}")
         # Clear JIT cache since nu_hyper_ratio is a static argument
         import jax
-        jax.clear_caches()
+        invalidate_solver_cache(self.solver)
         if hasattr(self.solver, '_step_jit'):
             delattr(self.solver, '_step_jit')
         # Recreate _step_jit to ensure it exists for next step
@@ -588,7 +589,7 @@ class FlowManager:
         print(f"Wall boundary condition: {'Slip' if is_slip else 'No-slip'}")
         # Clear JIT cache to recompile with new boundary condition
         import jax
-        jax.clear_caches()
+        invalidate_solver_cache(self.solver)
         if hasattr(self.solver, '_step_jit'):
             delattr(self.solver, '_step_jit')
         self.solver._step_jit = self.solver.get_step_jit()
@@ -606,7 +607,7 @@ class FlowManager:
         
         # Clear JIT cache and recompile since outlet_type is a static argument
         import jax
-        jax.clear_caches()
+        invalidate_solver_cache(self.solver)
         self.solver._jit_cache = {}
         if hasattr(self.solver, '_step_jit'):
             delattr(self.solver, '_step_jit')
@@ -629,7 +630,7 @@ class FlowManager:
         
         # Clear JIT cache and recompile since bc_mode is a static argument
         import jax
-        jax.clear_caches()
+        invalidate_solver_cache(self.solver)
         self.solver._jit_cache = {}
         if hasattr(self.solver, '_step_jit'):
             delattr(self.solver, '_step_jit')
@@ -802,7 +803,7 @@ class FlowManager:
         
         # Clear JIT cache and recompile since boundary config is a static argument
         import jax
-        jax.clear_caches()
+        invalidate_solver_cache(self.solver)
         self.solver._jit_cache = {}
         if hasattr(self.solver, '_step_jit'):
             delattr(self.solver, '_step_jit')

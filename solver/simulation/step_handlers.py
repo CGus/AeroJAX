@@ -59,7 +59,7 @@ except ImportError:
     MAC_OPERATORS_AVAILABLE = False
 
 
-def _step_collocated(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt: float) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def _step_collocated(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt: float, iteration=0) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single time step using projection method for collocated grid"""
     dx, dy = self.grid.dx, self.grid.dy
     
@@ -136,18 +136,15 @@ def _step_collocated(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt
     else:
         dp_dx, dp_dy = grad_x(p, dx), grad_y(p, dy)
     
-    u_corr = u_star - self.dt * dp_dx
-    v_corr = v_star - self.dt * dp_dy
+    u_corr = u_star - dt * dp_dx
+    v_corr = v_star - dt * dp_dy
 
     # Apply boundary conditions (Brinkman is now integrated into RHS computation)
     if self.sim_params.flow_type == 'von_karman':
         # Startup ramp - use cubic (smoothstep) for gentler initial ramp
-        if self.iteration >= self.startup_ramp_steps:
-            inlet_velocity = self.flow.U_inf
-        else:
-            t = self.iteration / self.startup_ramp_steps
-            ramp_factor = 3 * t**2 - 2 * t**3  # Cubic smoothstep (zero derivative at endpoints)
-            inlet_velocity = self.flow.U_inf * ramp_factor
+        t = jnp.minimum(iteration / max(self.startup_ramp_steps, 1), 1.0)
+        inlet_velocity = jnp.where(iteration >= self.startup_ramp_steps,
+                                   self.flow.U_inf, self.flow.U_inf * (3*t**2 - 2*t**3))
 
         # Apply inlet BC (excluding corners - wall BC takes precedence)
         u_corr = u_corr.at[0, 1:-1].set(inlet_velocity)  # Inlet, excluding corners
@@ -185,7 +182,7 @@ def _step_collocated(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt
     return u_corr, v_corr, p
 
 
-def _step_mac(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt: float) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def _step_mac(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt: float, iteration=0) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single time step using projection method for MAC staggered grid"""
     dx, dy = self.grid.dx, self.grid.dy
 
@@ -249,18 +246,15 @@ def _step_mac(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt: float
         dp_dx = grad_x_staggered(p, dx)
         dp_dy = grad_y_staggered(p, dy)
     
-    u_corr = u_star - self.dt * dp_dx
-    v_corr = v_star - self.dt * dp_dy
+    u_corr = u_star - dt * dp_dx
+    v_corr = v_star - dt * dp_dy
 
     # Apply boundary conditions (Brinkman is now integrated into RHS computation)
     if self.sim_params.flow_type == 'von_karman':
         # Startup ramp - use cubic (smoothstep) for gentler initial ramp
-        if self.iteration >= self.startup_ramp_steps:
-            inlet_velocity = self.flow.U_inf
-        else:
-            t = self.iteration / self.startup_ramp_steps
-            ramp_factor = 3 * t**2 - 2 * t**3  # Cubic smoothstep (zero derivative at endpoints)
-            inlet_velocity = self.flow.U_inf * ramp_factor
+        t = jnp.minimum(iteration / max(self.startup_ramp_steps, 1), 1.0)
+        inlet_velocity = jnp.where(iteration >= self.startup_ramp_steps,
+                                   self.flow.U_inf, self.flow.U_inf * (3*t**2 - 2*t**3))
 
         # Apply inlet BC (excluding corners - wall BC takes precedence)
         u_corr = u_corr.at[0, 1:-1].set(inlet_velocity)  # Inlet, excluding corners
@@ -293,23 +287,26 @@ def _step_mac(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt: float
     return u_corr, v_corr, p
 
 
-def _step(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt: float) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def _step(self, u: jnp.ndarray, v: jnp.ndarray, mask: jnp.ndarray, dt: float, iteration=0) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single time step using projection method - delegates to grid-specific step function"""
     if self.sim_params.grid_type == 'mac' and MAC_ADVECTION_AVAILABLE and MAC_OPERATORS_AVAILABLE and MAC_PRESSURE_AVAILABLE:
-        return self._step_mac(u, v, mask, dt)
+        return self._step_mac(u, v, mask, dt, iteration)
     else:
-        return self._step_collocated(u, v, mask, dt)
+        return self._step_collocated(u, v, mask, dt, iteration)
 
 
 def get_step_jit(self):
-    """Get cached JIT function"""
-    fast_mode = getattr(self.sim_params, 'fast_mode', False)
-    grid_type = self.sim_params.grid_type
-    key = (self.sim_params.advection_scheme, self.sim_params.pressure_solver,
-           self.sim_params.pressure_max_iter, self.grid.nx, self.grid.ny,
-           self.grid.dx, self.grid.dy, fast_mode, grid_type)
-    
+    """Invalidate only this solver when a captured configuration value changes."""
+    import copy
+    key = (repr(vars(self.sim_params)), float(self.flow.U_inf), float(self.flow.nu), float(self.flow.Re),
+           self.grid.nx, self.grid.ny, self.grid.dx, self.grid.dy,
+           self.nu_hyper_ratio, self.slip_walls, id(self.sdf),
+           getattr(self, 'startup_ramp_steps', 0), id(getattr(self, 'nn_pressure_model', None)))
     if key not in self._jit_cache:
-        self._jit_cache[key] = jax.jit(self._step)
-    
+        frozen = copy.copy(self)
+        frozen.flow = copy.copy(self.flow)
+        frozen.sim_params = copy.copy(self.sim_params)
+        self._jit_cache.clear()
+        self._jit_cache[key] = jax.jit(frozen._step)
+        self._batch_jit = None
     return self._jit_cache[key]

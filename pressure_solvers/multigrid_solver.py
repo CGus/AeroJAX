@@ -52,8 +52,18 @@ def poisson_jacobi(rhs: jnp.ndarray, mask: jnp.ndarray, dx: float, dy: float, ma
     
     return p
 
-@jax.jit(static_argnames=('flow_type', 'v_cycles'))
-def poisson_multigrid(rhs: jnp.ndarray, mask: jnp.ndarray, dx: float, dy: float, levels: int = 4, v_cycles: int = 5, tolerance: float = 1e-6, flow_type: Literal['von_karman', 'lid_driven_cavity', 'taylor_green'] = 'von_karman') -> jnp.ndarray:
+@jax.jit(static_argnames=(
+    'flow_type', 'levels', 'v_cycles', 'pre_smooth_steps',
+    'post_smooth_steps', 'coarse_smooth_steps', 'jacobi_omega',
+    'level_scaled_spacing'
+))
+def poisson_multigrid(rhs: jnp.ndarray, mask: jnp.ndarray, dx: float, dy: float,
+                      levels: int = 4, v_cycles: int = 5, tolerance: float = 1e-6,
+                      flow_type: Literal['von_karman', 'lid_driven_cavity', 'taylor_green'] = 'von_karman',
+                      initial_guess: jnp.ndarray = None, pre_smooth_steps: int = 2,
+                      post_smooth_steps: int = 2, coarse_smooth_steps: int = 10,
+                      jacobi_omega: float = 1.0,
+                      level_scaled_spacing: bool = False) -> jnp.ndarray:
     """Geometric Multigrid solver with non-periodic boundary conditions and convergence check
 
     Args:
@@ -155,29 +165,34 @@ def poisson_multigrid(rhs: jnp.ndarray, mask: jnp.ndarray, dx: float, dy: float,
         
         return fine
     
-    def smooth(p: jnp.ndarray, b: jnp.ndarray, mask_level: jnp.ndarray, nu: int = 2) -> jnp.ndarray:
+    def smooth(p: jnp.ndarray, b: jnp.ndarray, mask_level: jnp.ndarray,
+               level: int, nu: int = 2) -> jnp.ndarray:
         """Gauss-Seidel smoother - NO mask multiplication (pressure determined by physics)"""
         def smooth_step(p_state, i):
             p = p_state
             # Use ghost cells for non-periodic derivatives
-            p_padded = jnp.pad(p, ((1, 1), (1, 1)), mode='edge')
-            ax = 1.0 / (dx * dx)
-            ay = 1.0 / (dy * dy)
-            p_new = (ax * (p_padded[2:, 1:-1] + p_padded[:-2, 1:-1]) +
-                     ay * (p_padded[1:-1, 2:] + p_padded[1:-1, :-2]) - b) / (2.0 * (ax + ay))
+            pad_mode = 'edge' if flow_type in ['von_karman', 'lid_driven_cavity'] else 'wrap'
+            p_padded = jnp.pad(p, ((1, 1), (1, 1)), mode=pad_mode)
+            scale = (2 ** level) if level_scaled_spacing else 1
+            ax = 1.0 / ((dx * scale) ** 2)
+            ay = 1.0 / ((dy * scale) ** 2)
+            jacobi = (ax * (p_padded[2:, 1:-1] + p_padded[:-2, 1:-1]) +
+                      ay * (p_padded[1:-1, 2:] + p_padded[1:-1, :-2]) - b) / (2.0 * (ax + ay))
+            p_new = (1.0 - jacobi_omega) * p + jacobi_omega * jacobi
             return p_new, None
 
         p_final, _ = jax.lax.scan(smooth_step, p, jnp.arange(nu))
         return p_final
 
-    def apply_laplacian(p: jnp.ndarray) -> jnp.ndarray:
+    def apply_laplacian(p: jnp.ndarray, level: int = 0) -> jnp.ndarray:
         """Apply discrete Laplacian - NO boundary conditions here (pure linear operator)"""
         # Use ghost cells for non-periodic derivatives
         # Choose padding mode based on flow type
         pad_mode = 'edge' if flow_type in ['von_karman', 'lid_driven_cavity'] else 'wrap'
         p_padded = jnp.pad(p, ((1, 1), (1, 1)), mode=pad_mode)
-        ax = 1.0 / (dx * dx)
-        ay = 1.0 / (dy * dy)
+        scale = (2 ** level) if level_scaled_spacing else 1
+        ax = 1.0 / ((dx * scale) ** 2)
+        ay = 1.0 / ((dy * scale) ** 2)
         laplacian = ax * (p_padded[2:, 1:-1] + p_padded[:-2, 1:-1] - 2 * p) + \
                      ay * (p_padded[1:-1, 2:] + p_padded[1:-1, :-2] - 2 * p)
         return laplacian
@@ -185,17 +200,17 @@ def poisson_multigrid(rhs: jnp.ndarray, mask: jnp.ndarray, dx: float, dy: float,
     # V-cycle implementation with mask propagation
     def v_cycle(p: jnp.ndarray, b: jnp.ndarray, mask_level: jnp.ndarray, level: int) -> jnp.ndarray:
         if level >= max_levels:
-            return smooth(p, b, mask_level, nu=10)  # Direct solve on coarsest grid
+            return smooth(p, b, mask_level, level, nu=coarse_smooth_steps)
         
         # Pre-smooth
-        p = smooth(p, b, mask_level, nu=2)
+        p = smooth(p, b, mask_level, level, nu=pre_smooth_steps)
         
         # Apply boundary conditions after pre-smoothing
         if flow_type == 'von_karman':
             p = p.at[-1, :].set(0.0)     # Outlet: p = 0 (inlet is Neumann)
         
         # Restrict residual and mask
-        r = b - apply_laplacian(p)
+        r = b - apply_laplacian(p, level)
         r_coarse = restrict(r)
         mask_coarse = restrict(mask_level)
         mask_coarse = (mask_coarse > 0.5).astype(float)  # Threshold to keep binary
@@ -208,7 +223,7 @@ def poisson_multigrid(rhs: jnp.ndarray, mask: jnp.ndarray, dx: float, dy: float,
         p = p + e
         
         # Post-smooth
-        p = smooth(p, b, mask_level, nu=2)
+        p = smooth(p, b, mask_level, level, nu=post_smooth_steps)
         
         # Apply boundary conditions after post-smoothing
         if flow_type == 'von_karman':
@@ -216,7 +231,7 @@ def poisson_multigrid(rhs: jnp.ndarray, mask: jnp.ndarray, dx: float, dy: float,
         
         return p
     
-    p = jnp.zeros((nx, ny))
+    p = jnp.zeros((nx, ny)) if initial_guess is None else initial_guess
     
     # Use fixed iteration scan with convergence check
     def v_cycle_step(carry, i):

@@ -805,9 +805,23 @@ class ObstacleControls(CollapsibleGroupBox):
             # Recompute mask for preview
             viewer.solver.mask = viewer.solver._compute_mask()
             
-            # Update obstacle outline preview
-            if hasattr(viewer, 'obstacle_renderer') and viewer.obstacle_renderer:
-                viewer.obstacle_renderer.update_obstacle_outlines(viewer.solver, force_update=True)
+            # Update Custom PNG outline once on every renderer actually attached
+            # to the visualization. No per-frame contour recomputation.
+            renderers = []
+
+            r = getattr(viewer, 'obstacle_renderer', None)
+            if r is not None:
+                renderers.append(r)
+
+            flow_viz = getattr(viewer, 'flow_viz', None)
+            r = getattr(flow_viz, 'obstacle_renderer', None) if flow_viz is not None else None
+            if r is not None and all(r is not existing for existing in renderers):
+                renderers.append(r)
+
+            for renderer in renderers:
+                renderer.update_obstacle_outlines(viewer.solver, force_update=True)
+
+            print(f"Custom PNG outline updated on {len(renderers)} renderer(s)")
 
     def _on_x_position_changed(self, value):
         """Handle x-position slider changes."""
@@ -1735,13 +1749,14 @@ print("SUCCESS")
 
             # Map red channel to temperature using user-defined scale
             # Get temperature scale from solver params
-            temp_min = getattr(viewer.solver.lbm_params, 'thermal_solid_min_temp', 0.0)
-            temp_max = getattr(viewer.solver.lbm_params, 'thermal_solid_max_temp', 100.0)
+            lbm_params = getattr(viewer.solver, 'lbm_params', None)
+            temp_min = getattr(lbm_params, 'thermal_solid_min_temp', 0.0)
+            temp_max = getattr(lbm_params, 'thermal_solid_max_temp', 100.0)
 
             # Create temperature field from red channel
             # For solid pixels: T = temp_min + red * (temp_max - temp_min)
             # For non-solid pixels: use ambient temperature
-            temp_ambient = getattr(viewer.solver.lbm_params, 'thermal_ambient_temp', 20.0)
+            temp_ambient = getattr(lbm_params, 'thermal_ambient_temp', 20.0)
             temp_field = temp_ambient + solid_mask * red_normalized * (temp_max - temp_min)
 
             # Store temperature field
@@ -1757,6 +1772,20 @@ print("SUCCESS")
             # Use the combined mask as the LBM obstacle mask: fluid/inlet/outlet = 1, solid = 0
             viewer.solver.sim_params.custom_mask = combined_fluid_mask.copy()
             viewer.solver.sim_params.obstacle_type = 'custom'
+
+            # Update obstacle controls visibility for Custom PNG mode
+            if hasattr(self, 'naca_widget'):
+                self.naca_widget.setVisible(False)
+            if hasattr(self, 'cylinder_widget'):
+                self.cylinder_widget.setVisible(False)
+            if hasattr(self, 'cylinder_array_widget'):
+                self.cylinder_array_widget.setVisible(False)
+            if hasattr(self, 'solid_wall_widget'):
+                self.solid_wall_widget.setVisible(False)
+            if hasattr(self, 'urban_map_widget'):
+                self.urban_map_widget.setVisible(False)
+            if hasattr(self, 'tesla_valve_widget'):
+                self.tesla_valve_widget.setVisible(False)
             
             # Store original mask for spin rotation (for LBM solver)
             # Check if current solver is LBM (has lbm_params)
@@ -1776,6 +1805,17 @@ print("SUCCESS")
             if hasattr(viewer, 'obstacle_renderer') and viewer.obstacle_renderer:
                 viewer.obstacle_renderer.update_obstacle_outlines(viewer.solver, force_update=True)
             
+            # Update vorticity title for custom PNG obstacle
+            if hasattr(viewer, 'flow_viz') and viewer.flow_viz:
+                re = viewer.solver.flow.Re
+                u_inlet = viewer.solver.flow.U_inf
+                viewer.flow_viz.update_vorticity_title(
+                    re,
+                    u_inlet,
+                    "Custom PNG",
+                    0.0
+                )
+
             inlet_count = np.sum(inlet_mask)
             fluid_count = np.sum(fluid_mask)
             solid_count = np.sum(solid_mask)

@@ -5,7 +5,7 @@ Visualization settings controls.
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSpinBox, QCheckBox, QSlider, QComboBox, QGridLayout
+    QSpinBox, QCheckBox, QSlider, QComboBox, QGridLayout, QSizePolicy, QSizePolicy
 )
 from ..config import ConfigManager
 from .collapsible_groupbox import CollapsibleGroupBox
@@ -26,7 +26,58 @@ class VisualizationControls(CollapsibleGroupBox):
         warnings.filterwarnings('ignore', category=UserWarning, message='.*QGridLayoutEngine.*')
         
         layout = QGridLayout()
-        layout.setSpacing(5)
+
+        layout.setContentsMargins(6, 5, 6, 5)
+
+        # Testi leggibili mantenendo la GUI compatta
+        self.setStyleSheet("""
+            QLabel, QCheckBox {
+                font-size: 10px;
+            }
+            QPushButton {
+                font-size: 10px;
+                min-height: 22px;
+            }
+            QComboBox, QSpinBox, QDoubleSpinBox {
+                font-size: 10px;
+                min-height: 22px;
+            }
+        """)
+
+        layout.setContentsMargins(6, 5, 6, 5)
+
+        # Testi leggibili mantenendo la GUI compatta
+        self.setStyleSheet("""
+            QLabel, QCheckBox {
+                font-size: 10px;
+            }
+            QPushButton {
+                font-size: 10px;
+                min-height: 22px;
+            }
+            QComboBox, QSpinBox, QDoubleSpinBox {
+                font-size: 10px;
+                min-height: 22px;
+            }
+        """)
+
+        layout.setContentsMargins(6, 5, 6, 5)
+
+        # Testi leggibili mantenendo la GUI compatta
+        self.setStyleSheet("""
+            QLabel, QCheckBox {
+                font-size: 10px;
+            }
+            QPushButton {
+                font-size: 10px;
+                min-height: 22px;
+            }
+            QComboBox, QSpinBox, QDoubleSpinBox {
+                font-size: 10px;
+                min-height: 22px;
+            }
+        """)
+        layout.setSpacing(3)
         # Configure column stretches for all used columns (0-5)
         layout.setColumnStretch(0, 0)  # Fixed width for labels
         layout.setColumnStretch(1, 0)  # Fixed width for controls
@@ -42,10 +93,10 @@ class VisualizationControls(CollapsibleGroupBox):
         self.frame_skip_input.setValue(1)
         self.frame_skip_input.setSingleStep(1)
         self.frame_skip_input.setSuffix("x")
-        self.frame_skip_input.setMaximumWidth(80)
+        self.frame_skip_input.setMaximumWidth(65)
         layout.addWidget(self.frame_skip_input, 0, 1)
         self.apply_frame_skip_btn = QPushButton("Apply")
-        self.apply_frame_skip_btn.setMaximumWidth(60)
+        self.apply_frame_skip_btn.setMaximumWidth(50)
         layout.addWidget(self.apply_frame_skip_btn, 0, 2)
 
         # Row 1: Target FPS
@@ -55,10 +106,10 @@ class VisualizationControls(CollapsibleGroupBox):
         self.vis_fps_input.setValue(60)
         self.vis_fps_input.setSingleStep(5)
         self.vis_fps_input.setSuffix(" Hz")
-        self.vis_fps_input.setMaximumWidth(80)
+        self.vis_fps_input.setMaximumWidth(65)
         layout.addWidget(self.vis_fps_input, 1, 1)
         self.apply_vis_fps_btn = QPushButton("Apply")
-        self.apply_vis_fps_btn.setMaximumWidth(60)
+        self.apply_vis_fps_btn.setMaximumWidth(50)
         layout.addWidget(self.apply_vis_fps_btn, 1, 2)
 
         # Row 1.5: Profiling overlay toggle
@@ -92,40 +143,75 @@ class VisualizationControls(CollapsibleGroupBox):
         self.liquid_mode_checkbox = QCheckBox("Liquid Mode")
         self.liquid_mode_checkbox.setChecked(False)
         self.liquid_mode_checkbox.setToolTip("Enable liquid-like visualization effect with enhanced lighting")
-        display_toggle_row.addWidget(self.show_velocity_checkbox)
-        display_toggle_row.addWidget(self.show_vorticity_checkbox)
-        display_toggle_row.addWidget(self.show_pressure_checkbox)
-        display_toggle_row.addWidget(self.show_density_checkbox)
-        display_toggle_row.addWidget(self.show_dye_checkbox)
-        display_toggle_row.addWidget(self.particle_mode_checkbox)
-        display_toggle_row.addWidget(self.show_sdf_checkbox)
-        display_toggle_row.addWidget(self.show_streamlines_checkbox)
-        display_toggle_row.addWidget(self.show_quivers_checkbox)
-        display_toggle_row.addWidget(self.liquid_mode_checkbox)
-        display_toggle_row.addStretch()
-        layout.addLayout(display_toggle_row, 3, 0, 1, 3)  # Span all columns
+        display_toggle_row = QVBoxLayout()
+        display_toggle_row.setSpacing(2)
 
-        # Row 4: Color scale options - horizontal layout within grid cell
-        colorscale_row = QHBoxLayout()
+        display_row1 = QHBoxLayout()
+        display_row1.setSpacing(3)
+        display_row2 = QHBoxLayout()
+        display_row2.setSpacing(3)
+
+        display_row1.addWidget(self.show_velocity_checkbox)
+        display_row1.addWidget(self.show_vorticity_checkbox)
+        display_row1.addWidget(self.show_pressure_checkbox)
+        display_row1.addWidget(self.show_density_checkbox)
+        display_row1.addWidget(self.show_dye_checkbox)
+
+        display_row2.addWidget(self.particle_mode_checkbox)
+        display_row2.addWidget(self.show_sdf_checkbox)
+        display_row2.addWidget(self.show_streamlines_checkbox)
+        display_row2.addWidget(self.show_quivers_checkbox)
+        display_row2.addWidget(self.liquid_mode_checkbox)
+
+        display_row1.addStretch()
+        display_row2.addStretch()
+
+        display_toggle_row.addLayout(display_row1)
+        display_toggle_row.addLayout(display_row2)
+
+        layout.addLayout(display_toggle_row, 3, 0, 1, 3)
+
+        # Row 4: Color scale options - compact 2 rows
+        colorscale_row = QVBoxLayout()
+        colorscale_row.setSpacing(2)
+
+        colorscale_row1 = QHBoxLayout()
+        colorscale_row1.setSpacing(3)
+
         self.log_colorscale_checkbox = QCheckBox("Log Color Scale")
         self.log_colorscale_checkbox.setChecked(True)
+
         self.spatial_colorscale_checkbox = QCheckBox("Spatial Weighting")
         self.spatial_colorscale_checkbox.setChecked(False)
+
+        colorscale_row1.addWidget(self.log_colorscale_checkbox)
+        colorscale_row1.addWidget(self.spatial_colorscale_checkbox)
+        colorscale_row1.addStretch()
+
+        colorscale_row2 = QHBoxLayout()
+        colorscale_row2.setSpacing(3)
+
         self.adaptive_colorscale_checkbox = QCheckBox("Adaptive Scale")
         self.adaptive_colorscale_checkbox.setChecked(True)
-        self.adaptive_colorscale_checkbox.setToolTip("When enabled, color scales adjust automatically to data range. Disable to allow manual adjustment.")
-        colorscale_row.addWidget(self.log_colorscale_checkbox)
-        colorscale_row.addWidget(self.spatial_colorscale_checkbox)
-        colorscale_row.addWidget(self.adaptive_colorscale_checkbox)
-        colorscale_row.addStretch()
-        layout.addLayout(colorscale_row, 4, 0, 1, 3)  # Span all columns
+        self.adaptive_colorscale_checkbox.setToolTip(
+            "When enabled, color scales adjust automatically to data range. "
+            "Disable to allow manual adjustment."
+        )
+
+        colorscale_row2.addWidget(self.adaptive_colorscale_checkbox)
+        colorscale_row2.addStretch()
+
+        colorscale_row.addLayout(colorscale_row1)
+        colorscale_row.addLayout(colorscale_row2)
+
+        layout.addLayout(colorscale_row, 4, 0, 1, 3)
 
         # Row 5: Visualization smoothing
         layout.addWidget(QLabel("Smooth:"), 5, 0)
         self.upscale_slider = QSlider(Qt.Orientation.Horizontal)
         self.upscale_slider.setRange(1, 10)
         self.upscale_slider.setValue(1)
-        self.upscale_slider.setMaximumWidth(120)
+        self.upscale_slider.setMaximumWidth(90)
         layout.addWidget(self.upscale_slider, 5, 1)
         self.upscale_label = QLabel("1x")
         layout.addWidget(self.upscale_label, 5, 2)
@@ -135,7 +221,7 @@ class VisualizationControls(CollapsibleGroupBox):
         self.liquid_height_slider = QSlider(Qt.Orientation.Horizontal)
         self.liquid_height_slider.setRange(1, 50)
         self.liquid_height_slider.setValue(12)
-        self.liquid_height_slider.setMaximumWidth(120)
+        self.liquid_height_slider.setMaximumWidth(90)
         layout.addWidget(self.liquid_height_slider, 6, 1)
         self.liquid_height_label = QLabel("12")
         layout.addWidget(self.liquid_height_label, 6, 2)
@@ -145,7 +231,7 @@ class VisualizationControls(CollapsibleGroupBox):
         self.liquid_light_x_slider = QSlider(Qt.Orientation.Horizontal)
         self.liquid_light_x_slider.setRange(-100, 100)
         self.liquid_light_x_slider.setValue(20)
-        self.liquid_light_x_slider.setMaximumWidth(120)
+        self.liquid_light_x_slider.setMaximumWidth(90)
         layout.addWidget(self.liquid_light_x_slider, 7, 1)
         self.liquid_light_x_label = QLabel("0.2")
         layout.addWidget(self.liquid_light_x_label, 7, 2)
@@ -155,7 +241,7 @@ class VisualizationControls(CollapsibleGroupBox):
         self.liquid_light_y_slider = QSlider(Qt.Orientation.Horizontal)
         self.liquid_light_y_slider.setRange(-100, 100)
         self.liquid_light_y_slider.setValue(40)
-        self.liquid_light_y_slider.setMaximumWidth(120)
+        self.liquid_light_y_slider.setMaximumWidth(90)
         layout.addWidget(self.liquid_light_y_slider, 8, 1)
         self.liquid_light_y_label = QLabel("0.4")
         layout.addWidget(self.liquid_light_y_label, 8, 2)
@@ -165,7 +251,7 @@ class VisualizationControls(CollapsibleGroupBox):
         self.liquid_light_z_slider = QSlider(Qt.Orientation.Horizontal)
         self.liquid_light_z_slider.setRange(-100, 100)
         self.liquid_light_z_slider.setValue(90)
-        self.liquid_light_z_slider.setMaximumWidth(120)
+        self.liquid_light_z_slider.setMaximumWidth(90)
         layout.addWidget(self.liquid_light_z_slider, 9, 1)
         self.liquid_light_z_label = QLabel("0.9")
         layout.addWidget(self.liquid_light_z_label, 9, 2)
@@ -175,7 +261,7 @@ class VisualizationControls(CollapsibleGroupBox):
         self.liquid_specular_slider = QSlider(Qt.Orientation.Horizontal)
         self.liquid_specular_slider.setRange(0, 100)
         self.liquid_specular_slider.setValue(50)
-        self.liquid_specular_slider.setMaximumWidth(120)
+        self.liquid_specular_slider.setMaximumWidth(90)
         layout.addWidget(self.liquid_specular_slider, 10, 1)
         self.liquid_specular_label = QLabel("0.5")
         layout.addWidget(self.liquid_specular_label, 10, 2)
@@ -241,43 +327,96 @@ class VisualizationControls(CollapsibleGroupBox):
         self._populate_pressure_colormaps()
         layout.addWidget(self.pressure_colormap_combo, 17, 1, 1, 2)  # Span 2 columns
 
-        # Row 18: Export buttons
+        # Row 18-19: Export / State buttons - compact 2-row layout
+        export_row1 = QHBoxLayout()
+        export_row1.setSpacing(4)
+        export_row1.setSpacing(4)
         self.export_btn = QPushButton("Export Frame")
-        self.export_btn.setMaximumWidth(100)
-        layout.addWidget(self.export_btn, 18, 0)
+        self.export_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.export_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.export_btn.setMaximumWidth(95)
+        export_row1.addWidget(self.export_btn)
+
         self.record_btn = QPushButton("Record")
-        self.record_btn.setMaximumWidth(80)
-        layout.addWidget(self.record_btn, 18, 1)
+        self.record_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.record_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.record_btn.setMaximumWidth(70)
+        export_row1.addWidget(self.record_btn)
+
         self.save_video_btn = QPushButton("Save Video")
         self.save_video_btn.setEnabled(False)
-        self.save_video_btn.setMaximumWidth(90)
-        layout.addWidget(self.save_video_btn, 18, 2)
+        self.save_video_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.save_video_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.save_video_btn.setMaximumWidth(85)
+        export_row1.addWidget(self.save_video_btn)
+        export_row1.addStretch()
+
+        layout.addLayout(export_row1, 18, 0, 1, 3)
+
+        export_row2 = QHBoxLayout()
+        export_row2.setSpacing(4)
+        export_row2.setSpacing(4)
         self.save_state_btn = QPushButton("Save State")
         self.save_state_btn.setEnabled(True)
-        self.save_state_btn.setMaximumWidth(90)
-        layout.addWidget(self.save_state_btn, 18, 3)
+        self.save_state_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.save_state_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.save_state_btn.setMaximumWidth(85)
+        export_row2.addWidget(self.save_state_btn)
+
         self.load_state_btn = QPushButton("Load State")
         self.load_state_btn.setEnabled(True)
-        self.load_state_btn.setMaximumWidth(90)
-        layout.addWidget(self.load_state_btn, 18, 4)
+        self.load_state_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.load_state_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.load_state_btn.setMaximumWidth(85)
+        export_row2.addWidget(self.load_state_btn)
+        export_row2.addStretch()
 
-        # Row 19: Auto-scale buttons
-        layout.addWidget(QLabel("Auto-scale:"), 19, 0)
+        layout.addLayout(export_row2, 19, 0, 1, 3)
+
+        # Row 20-21: Auto-scale buttons - compact 2-row layout
+        autoscale_row1 = QHBoxLayout()
+        autoscale_row1.setSpacing(4)
+        autoscale_row1.setSpacing(4)
+        autoscale_row1.addWidget(QLabel("Auto-scale:"))
+
         self.autofit_velocity_btn = QPushButton("Velocity")
-        self.autofit_velocity_btn.setMaximumWidth(70)
-        layout.addWidget(self.autofit_velocity_btn, 19, 1)
+        self.autofit_velocity_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.autofit_velocity_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.autofit_velocity_btn.setMaximumWidth(75)
+        autoscale_row1.addWidget(self.autofit_velocity_btn)
+
         self.autofit_vorticity_btn = QPushButton("Vorticity")
-        self.autofit_vorticity_btn.setMaximumWidth(70)
-        layout.addWidget(self.autofit_vorticity_btn, 19, 2)
+        self.autofit_vorticity_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.autofit_vorticity_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.autofit_vorticity_btn.setMaximumWidth(75)
+        autoscale_row1.addWidget(self.autofit_vorticity_btn)
+        autoscale_row1.addStretch()
+
+        layout.addLayout(autoscale_row1, 20, 0, 1, 3)
+
+        autoscale_row2 = QHBoxLayout()
+        autoscale_row2.setSpacing(4)
+        autoscale_row2.setSpacing(4)
         self.autofit_pressure_btn = QPushButton("Pressure")
-        self.autofit_pressure_btn.setMaximumWidth(70)
-        layout.addWidget(self.autofit_pressure_btn, 19, 3)
+        self.autofit_pressure_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.autofit_pressure_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.autofit_pressure_btn.setMaximumWidth(75)
+        autoscale_row2.addWidget(self.autofit_pressure_btn)
+
         self.autofit_dye_btn = QPushButton("Dye")
+        self.autofit_dye_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.autofit_dye_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.autofit_dye_btn.setMaximumWidth(50)
-        layout.addWidget(self.autofit_dye_btn, 19, 4)
+        autoscale_row2.addWidget(self.autofit_dye_btn)
+
         self.autofit_all_btn = QPushButton("All")
+        self.autofit_all_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.autofit_all_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.autofit_all_btn.setMaximumWidth(50)
-        layout.addWidget(self.autofit_all_btn, 19, 5)
+        autoscale_row2.addWidget(self.autofit_all_btn)
+        autoscale_row2.addStretch()
+
+        layout.addLayout(autoscale_row2, 21, 0, 1, 3)
 
         self.setLayout(layout)
 

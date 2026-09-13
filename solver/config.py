@@ -21,5 +21,15 @@ def configure_jax(platform='cpu', enable_x64=False, debug_nans=False):
     jax.config.update('jax_debug_nans', debug_nans)
 
 
-# Default configuration
-configure_jax(platform='cpu', enable_x64=False, debug_nans=False)
+# Backend selection belongs to the entry point/JAX environment, not an import.
+# JAX selects an available accelerator unless the caller explicitly selects CPU.
+
+
+def invalidate_solver_cache(solver):
+    """Keep global cache eviction only for the unaudited legacy LBM backend."""
+    if getattr(solver.sim_params, 'solver_type', 'navier_stokes') == 'lattice_boltzmann':
+        jax.clear_caches()
+    if hasattr(solver, '_jit_cache'):
+        solver._jit_cache.clear()
+    if hasattr(solver, '_batch_jit'):
+        solver._batch_jit = None

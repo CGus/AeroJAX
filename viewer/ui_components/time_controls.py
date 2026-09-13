@@ -24,8 +24,8 @@ class TimeControls(CollapsibleGroupBox):
 
         layout.addWidget(QLabel("dt:"))
         self.dt_spinbox = QDoubleSpinBox()
-        self.dt_spinbox.setRange(0.0001, 0.01)
-        self.dt_spinbox.setDecimals(4)
+        self.dt_spinbox.setRange(1e-8, 0.01)
+        self.dt_spinbox.setDecimals(8)
         self.dt_spinbox.setSingleStep(0.0001)
         self.dt_spinbox.setValue(0.005)  # Reduced from 0.01 for better stability
         self.dt_spinbox.setMaximumWidth(150)
